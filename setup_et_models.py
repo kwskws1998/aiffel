@@ -191,6 +191,11 @@ def main():
         help="SelectiveCacheForLM 클론 경로"
     )
     parser.add_argument(
+        "--skip-et1",
+        action="store_true",
+        help="ET model 1(SelectiveCacheForLM) 설정을 건너뜀",
+    )
+    parser.add_argument(
         "--no-et2-auto-download",
         action="store_true",
         help="로컬 ET2 체크포인트가 없을 때 HF 자동 다운로드를 비활성화",
@@ -210,7 +215,11 @@ def main():
     if not args.skip_install:
         install_packages()
 
-    setup_et_model1(args.clone_dir)
+    if args.skip_et1:
+        print("\n[2/4] ET model 1 설정 건너뜀 (--skip-et1)")
+    else:
+        setup_et_model1(args.clone_dir)
+
     resolve_or_download_et_model2(
         args.et2_checkpoint,
         auto_download=not args.no_et2_auto_download,

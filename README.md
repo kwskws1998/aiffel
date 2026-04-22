@@ -249,12 +249,37 @@ https://drive.google.com/drive/folders/1BzdVmN51f33NHrdemJajz67MmlZljB2J?usp=sha
 
 ## Code
 
-### ET model setup (includes ET2 HF auto-download)
+### One-shot setup (new GPU/server)
 
-Run once before training with gaze concat:
+Run this once on a fresh machine:
 
 ```bash
-python setup_et_models.py --et2-checkpoint ./checkpoints/et_predictor2_seed123
+bash bootstrap_env.sh
+```
+
+What it does:
+- installs python dependencies from `requirements.txt` (includes `importlib_resources==6.5.2`)
+- prepares ET2 and auto-downloads checkpoint from `skboy/et_prediction_2` if missing
+- builds English dataset files under `data/`
+
+Re-run quickly without reinstalling deps:
+
+```bash
+bash bootstrap_env.sh --no-deps
+```
+
+If you also want ET model 1 assets:
+
+```bash
+bash bootstrap_env.sh --with-et1
+```
+
+### ET model setup (includes ET2 HF auto-download)
+
+If you prefer running ET setup manually:
+
+```bash
+python setup_et_models.py --skip-install --skip-et1 --et2-checkpoint ./checkpoints/et_predictor2_seed123
 ```
 
 If `./checkpoints/et_predictor2_seed123(.pt/.safetensors)` is missing, the setup script
@@ -268,6 +293,9 @@ If you want to run quickly with English data only, use:
 ```bash
 python3 prepare_english_data.py --output-dir data --seed 42
 ```
+
+The script is idempotent: if `full_dataset_fold1.csv`, `full_dataset_fold2.csv`, and
+`full_dataset_english_all.csv` already exist, it skips rebuilding unless `--force` is used.
 
 This creates:
 - `data/full_dataset_fold1.csv`

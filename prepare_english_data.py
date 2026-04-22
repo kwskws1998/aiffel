@@ -172,7 +172,21 @@ def _write_tsv(df, path):
     )
 
 
-def build_english_dataset(output_dir, seed):
+def build_english_dataset(output_dir, seed, force=False):
+    fold1_path = os.path.join(output_dir, "full_dataset_fold1.csv")
+    fold2_path = os.path.join(output_dir, "full_dataset_fold2.csv")
+    merged_path = os.path.join(output_dir, "full_dataset_english_all.csv")
+
+    if (
+        not force
+        and os.path.isfile(fold1_path)
+        and os.path.isfile(fold2_path)
+        and os.path.isfile(merged_path)
+    ):
+        print("English dataset already exists. Skipping download/build.")
+        print(f"Use --force to rebuild: {fold1_path}, {fold2_path}")
+        return
+
     emobank = _post_process_dataset(
         _prepare_emobank(_download_bytes(ENGLISH_SOURCES["emobank"]["url"]))
     )
@@ -195,11 +209,11 @@ def build_english_dataset(output_dir, seed):
     fold1, fold2 = _split_in_two_folds(merged, seed=seed)
 
     os.makedirs(output_dir, exist_ok=True)
-    _write_tsv(fold1, os.path.join(output_dir, "full_dataset_fold1.csv"))
-    _write_tsv(fold2, os.path.join(output_dir, "full_dataset_fold2.csv"))
+    _write_tsv(fold1, fold1_path)
+    _write_tsv(fold2, fold2_path)
     _write_tsv(
         pd.concat([fold1, fold2], ignore_index=True),
-        os.path.join(output_dir, "full_dataset_english_all.csv"),
+        merged_path,
     )
 
     counts = merged.groupby("dataset_of_origin").size().sort_values(ascending=False)
@@ -208,8 +222,8 @@ def build_english_dataset(output_dir, seed):
     print("Samples per source:")
     for name, value in counts.items():
         print(f"- {name}: {value}")
-    print(f"Saved: {os.path.join(output_dir, 'full_dataset_fold1.csv')}")
-    print(f"Saved: {os.path.join(output_dir, 'full_dataset_fold2.csv')}")
+    print(f"Saved: {fold1_path}")
+    print(f"Saved: {fold2_path}")
 
 
 if __name__ == "__main__":
@@ -227,5 +241,10 @@ if __name__ == "__main__":
         default=42,
         help="Shuffle seed used before splitting into fold1/fold2",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild files even if full_dataset_fold1/2 and full_dataset_english_all already exist.",
+    )
     args = parser.parse_args()
-    build_english_dataset(output_dir=args.output_dir, seed=args.seed)
+    build_english_dataset(output_dir=args.output_dir, seed=args.seed, force=args.force)
