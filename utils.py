@@ -94,6 +94,11 @@ def create_prediction_tables(path):
         'word ratings ES' : 'Spanish', 'Cantonese Nouns' : 'Cantonese', 'ANEW to EP' : 'Portuguese', 'MAS' : 'Portuguese'
     }
 
+    # Keep only datasets available in the current run (e.g., English-only subsets).
+    available_datasets = set(df_join.dataset_of_origin.unique())
+    words_ds_list = [ds for ds in words_ds_list if ds in available_datasets]
+    sent_ds_list = [ds for ds in sent_ds_list if ds in available_datasets]
+
     # add ds_type column
     temp_word = df_join[df_join['dataset_of_origin'].isin(words_ds_list)] #['ds_type'] = 'word'
     temp_word = temp_word.assign(ds_type = 'word')
@@ -118,7 +123,7 @@ def create_prediction_tables(path):
     
     # Add columns language and type
     def add_column_lang(ds_origin):
-        return dataset_langs[ds_origin]
+        return dataset_langs.get(ds_origin, 'Unknown')
 
     # run add col lang function
     full_df['language'] = full_df.dataset_of_origin.apply(add_column_lang)
@@ -134,55 +139,57 @@ def create_prediction_tables(path):
     r_val_array = []
     r_aro_array = []
 
-    for ds in words_ds_list:
-        # language
-        l = dataset_langs[ds]
-        lang_array.append(l)
-        df_temp = full_df[full_df.dataset_of_origin == ds]
-        # How to calculate MSE, MAE for valence and arousal for one of the datasets
-        mse_valence = mean_squared_error(df_temp.valence_true, df_temp.valence_pred, squared=False)
-        mse_arousal = mean_squared_error(df_temp.arousal_true, df_temp.arousal_pred, squared=False)
-        mae_valence = mean_absolute_error(df_temp.valence_true, df_temp.valence_pred)
-        mae_arousal = mean_absolute_error(df_temp.arousal_true, df_temp.arousal_pred)
-        r_valence = pearsonr(df_temp.valence_true, df_temp.valence_pred)
-        r_arousal = pearsonr(df_temp.arousal_true, df_temp.arousal_pred)
-       
-        # Append values to its arrays
-        mse_val_array.append(round(mse_valence,4))
-        mse_aro_array.append(round(mse_arousal,4))
-        mae_val_array.append(round(mae_valence,4))
-        mae_aro_array.append(round(mae_arousal,4))
-        r_val_array.append(round(r_valence[0],4))
-        r_aro_array.append(round(r_arousal[0],4))
+    if words_ds_list:
+        for ds in words_ds_list:
+            # language
+            l = dataset_langs.get(ds, 'Unknown')
+            lang_array.append(l)
+            df_temp = full_df[full_df.dataset_of_origin == ds]
+            # How to calculate MSE, MAE for valence and arousal for one of the datasets
+            mse_valence = mean_squared_error(df_temp.valence_true, df_temp.valence_pred, squared=False)
+            mse_arousal = mean_squared_error(df_temp.arousal_true, df_temp.arousal_pred, squared=False)
+            mae_valence = mean_absolute_error(df_temp.valence_true, df_temp.valence_pred)
+            mae_arousal = mean_absolute_error(df_temp.arousal_true, df_temp.arousal_pred)
+            r_valence = pearsonr(df_temp.valence_true, df_temp.valence_pred)
+            r_arousal = pearsonr(df_temp.arousal_true, df_temp.arousal_pred)
+           
+            # Append values to its arrays
+            mse_val_array.append(round(mse_valence,4))
+            mse_aro_array.append(round(mse_arousal,4))
+            mae_val_array.append(round(mae_valence,4))
+            mae_aro_array.append(round(mae_arousal,4))
+            r_val_array.append(round(r_valence[0],4))
+            r_aro_array.append(round(r_arousal[0],4))
 
-    # Arrays to put in the df
-    ds_array = np.array(words_ds_list).reshape(len(words_ds_list), 1)
-    lang_array = np.array(lang_array).reshape(len(lang_array), 1)
-    mse_val_array = np.array(mse_val_array).reshape(len(mse_val_array), 1)
-    mse_aro_array = np.array(mse_aro_array).reshape(len(mse_aro_array), 1)
-    mae_val_array = np.array(mae_val_array).reshape(len(mae_val_array), 1)
-    mae_aro_array = np.array(mae_aro_array).reshape(len(mae_aro_array), 1)
-    r_val_array = np.array(r_val_array).reshape(len(r_val_array), 1)
-    r_aro_array = np.array(r_aro_array).reshape(len(r_aro_array), 1)
+        # Arrays to put in the df
+        ds_array = np.array(words_ds_list).reshape(len(words_ds_list), 1)
+        lang_array = np.array(lang_array).reshape(len(lang_array), 1)
+        mse_val_array = np.array(mse_val_array).reshape(len(mse_val_array), 1)
+        mse_aro_array = np.array(mse_aro_array).reshape(len(mse_aro_array), 1)
+        mae_val_array = np.array(mae_val_array).reshape(len(mae_val_array), 1)
+        mae_aro_array = np.array(mae_aro_array).reshape(len(mae_aro_array), 1)
+        r_val_array = np.array(r_val_array).reshape(len(r_val_array), 1)
+        r_aro_array = np.array(r_aro_array).reshape(len(r_aro_array), 1)
 
-    matrix = np.hstack((ds_array, lang_array, mse_val_array, mae_val_array, r_val_array, mse_aro_array, mae_aro_array, r_aro_array))
-    # Putting the df together
-    header = [np.array(['', '','Valence', 'Valence', 'Valence', 'Arousal', 'Arousal', 'Arousal']), 
-    np.array(['Dataset','Language', 'MSE', 'MAE', 'r', 'MSE', 'MAE', 'r'])]
+        matrix = np.hstack((ds_array, lang_array, mse_val_array, mae_val_array, r_val_array, mse_aro_array, mae_aro_array, r_aro_array))
+        # Putting the df together
+        header = [np.array(['', '','Valence', 'Valence', 'Valence', 'Arousal', 'Arousal', 'Arousal']), 
+        np.array(['Dataset','Language', 'MSE', 'MAE', 'r', 'MSE', 'MAE', 'r'])]
 
-    df = pd.DataFrame(matrix, columns= header) #, index=ind
+        df = pd.DataFrame(matrix, columns= header) #, index=ind
 
-    def df_style(val):
-        return "font-weight: bold"
+        def df_style(val):
+            return "font-weight: bold"
 
-    v_mse_mean = np.mean(np.array(df.Valence.MSE, dtype=np.float))
-    v_mae_mean = np.mean(np.array(df.Valence.MAE, dtype=np.float))
-    v_r_mean = np.mean(np.array(df.Valence.r, dtype=np.float))
-    a_mse_mean = np.mean(np.array(df.Arousal.MSE, dtype=np.float))
-    a_mae_mean = np.mean(np.array(df.Arousal.MAE, dtype=np.float))
-    a_r_mean = np.mean(np.array(df.Arousal.r, dtype=np.float))
-    df.loc[df.shape[0]] = ['Overall','', round(v_mse_mean,4), round(v_mae_mean,4), round(v_r_mean,4), round(a_mse_mean,4), round(a_mae_mean,4), round(a_r_mean,4)]
-    last_row = pd.IndexSlice[df.index[df.index == 22], :]
+        v_mse_mean = np.mean(np.array(df.Valence.MSE, dtype=float))
+        v_mae_mean = np.mean(np.array(df.Valence.MAE, dtype=float))
+        v_r_mean = np.mean(np.array(df.Valence.r, dtype=float))
+        a_mse_mean = np.mean(np.array(df.Arousal.MSE, dtype=float))
+        a_mae_mean = np.mean(np.array(df.Arousal.MAE, dtype=float))
+        a_r_mean = np.mean(np.array(df.Arousal.r, dtype=float))
+        df.loc[df.shape[0]] = ['Overall','', round(v_mse_mean,4), round(v_mae_mean,4), round(v_r_mean,4), round(a_mse_mean,4), round(a_mae_mean,4), round(a_r_mean,4)]
+    else:
+        df = pd.DataFrame()
     df.to_pickle(path + "/table1.pkl")
 
     # TABLE 2 - Sentence datasets
@@ -195,51 +202,53 @@ def create_prediction_tables(path):
     r_val_array = []
     r_aro_array = []
 
-    for ds in sent_ds_list:
-        # language
-        l = dataset_langs[ds]
-        lang_array.append(l)
-        #get sub-df
-        df_temp = full_df[full_df.dataset_of_origin == ds]
-        # How to calculate RMSE, MAE for valence and arousal for one of the datasets
-        mse_valence = mean_squared_error(df_temp.valence_true, df_temp.valence_pred, squared=False)
-        mse_arousal = mean_squared_error(df_temp.arousal_true, df_temp.arousal_pred, squared=False)
-        mae_valence = mean_absolute_error(df_temp.valence_true, df_temp.valence_pred)
-        mae_arousal = mean_absolute_error(df_temp.arousal_true, df_temp.arousal_pred)
-        r_valence = pearsonr(df_temp.valence_true, df_temp.valence_pred)
-        r_arousal = pearsonr(df_temp.arousal_true, df_temp.arousal_pred)
-        # Append values to its arrays
-        mse_val_array.append(round(mse_valence,4))
-        mse_aro_array.append(round(mse_arousal,4))
-        mae_val_array.append(round(mae_valence,4))
-        mae_aro_array.append(round(mae_arousal,4))
-        r_val_array.append(round(r_valence[0],4))
-        r_aro_array.append(round(r_arousal[0],4))
+    if sent_ds_list:
+        for ds in sent_ds_list:
+            # language
+            l = dataset_langs.get(ds, 'Unknown')
+            lang_array.append(l)
+            #get sub-df
+            df_temp = full_df[full_df.dataset_of_origin == ds]
+            # How to calculate RMSE, MAE for valence and arousal for one of the datasets
+            mse_valence = mean_squared_error(df_temp.valence_true, df_temp.valence_pred, squared=False)
+            mse_arousal = mean_squared_error(df_temp.arousal_true, df_temp.arousal_pred, squared=False)
+            mae_valence = mean_absolute_error(df_temp.valence_true, df_temp.valence_pred)
+            mae_arousal = mean_absolute_error(df_temp.arousal_true, df_temp.arousal_pred)
+            r_valence = pearsonr(df_temp.valence_true, df_temp.valence_pred)
+            r_arousal = pearsonr(df_temp.arousal_true, df_temp.arousal_pred)
+            # Append values to its arrays
+            mse_val_array.append(round(mse_valence,4))
+            mse_aro_array.append(round(mse_arousal,4))
+            mae_val_array.append(round(mae_valence,4))
+            mae_aro_array.append(round(mae_arousal,4))
+            r_val_array.append(round(r_valence[0],4))
+            r_aro_array.append(round(r_arousal[0],4))
 
-    # Arrays to put in the df
-    ds_array = np.array(sent_ds_list).reshape(len(sent_ds_list), 1)
-    lang_array = np.array(lang_array).reshape(len(lang_array), 1)
-    mse_val_array = np.array(mse_val_array).reshape(len(mse_val_array), 1)
-    mse_aro_array = np.array(mse_aro_array).reshape(len(mse_aro_array), 1)
-    mae_val_array = np.array(mae_val_array).reshape(len(mae_val_array), 1)
-    mae_aro_array = np.array(mae_aro_array).reshape(len(mae_aro_array), 1)
-    r_val_array = np.array(r_val_array).reshape(len(r_val_array), 1)
-    r_aro_array = np.array(r_aro_array).reshape(len(r_aro_array), 1)
-    matrix = np.hstack((ds_array, lang_array, mse_val_array, mae_val_array, r_val_array, mse_aro_array, mae_aro_array, r_aro_array))
-    # Putting the df together
-    header = [np.array(['', '','Valence', 'Valence', 'Valence', 'Arousal', 'Arousal', 'Arousal']), 
-    np.array(['Dataset','Language', 'MSE', 'MAE', 'r', 'MSE', 'MAE', 'r'])]
+        # Arrays to put in the df
+        ds_array = np.array(sent_ds_list).reshape(len(sent_ds_list), 1)
+        lang_array = np.array(lang_array).reshape(len(lang_array), 1)
+        mse_val_array = np.array(mse_val_array).reshape(len(mse_val_array), 1)
+        mse_aro_array = np.array(mse_aro_array).reshape(len(mse_aro_array), 1)
+        mae_val_array = np.array(mae_val_array).reshape(len(mae_val_array), 1)
+        mae_aro_array = np.array(mae_aro_array).reshape(len(mae_aro_array), 1)
+        r_val_array = np.array(r_val_array).reshape(len(r_val_array), 1)
+        r_aro_array = np.array(r_aro_array).reshape(len(r_aro_array), 1)
+        matrix = np.hstack((ds_array, lang_array, mse_val_array, mae_val_array, r_val_array, mse_aro_array, mae_aro_array, r_aro_array))
+        # Putting the df together
+        header = [np.array(['', '','Valence', 'Valence', 'Valence', 'Arousal', 'Arousal', 'Arousal']), 
+        np.array(['Dataset','Language', 'MSE', 'MAE', 'r', 'MSE', 'MAE', 'r'])]
 
-    df = pd.DataFrame(matrix, columns= header) #, index=ind
+        df = pd.DataFrame(matrix, columns= header) #, index=ind
 
-    v_mse_mean = np.mean(np.array(df.Valence.MSE, dtype=np.float))
-    v_mae_mean = np.mean(np.array(df.Valence.MAE, dtype=np.float))
-    v_r_mean = np.mean(np.array(df.Valence.r, dtype=np.float))
-    a_mse_mean = np.mean(np.array(df.Arousal.MSE, dtype=np.float))
-    a_mae_mean = np.mean(np.array(df.Arousal.MAE, dtype=np.float))
-    a_r_mean = np.mean(np.array(df.Arousal.r, dtype=np.float))
-    df.loc[df.shape[0]] = ['Overall','', round(v_mse_mean,4), round(v_mae_mean,4), round(v_r_mean,4), round(a_mse_mean,4), round(a_mae_mean,4), round(a_r_mean,4)]
-    last_row = pd.IndexSlice[df.index[df.index == 12], :]
+        v_mse_mean = np.mean(np.array(df.Valence.MSE, dtype=float))
+        v_mae_mean = np.mean(np.array(df.Valence.MAE, dtype=float))
+        v_r_mean = np.mean(np.array(df.Valence.r, dtype=float))
+        a_mse_mean = np.mean(np.array(df.Arousal.MSE, dtype=float))
+        a_mae_mean = np.mean(np.array(df.Arousal.MAE, dtype=float))
+        a_r_mean = np.mean(np.array(df.Arousal.r, dtype=float))
+        df.loc[df.shape[0]] = ['Overall','', round(v_mse_mean,4), round(v_mae_mean,4), round(v_r_mean,4), round(a_mse_mean,4), round(a_mae_mean,4), round(a_r_mean,4)]
+    else:
+        df = pd.DataFrame()
     df.to_pickle(path + "/table2.pkl")
    
    

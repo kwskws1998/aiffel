@@ -249,6 +249,28 @@ https://drive.google.com/drive/folders/1BzdVmN51f33NHrdemJajz67MmlZljB2J?usp=sha
 
 ## Code
 
+### Build English-only dataset (from README links)
+
+If you want to run quickly with English data only, use:
+
+```bash
+python3 prepare_english_data.py --output-dir data --seed 42
+```
+
+This creates:
+- `data/full_dataset_fold1.csv`
+- `data/full_dataset_fold2.csv`
+- `data/full_dataset_english_all.csv`
+
+Included public English sources:
+- `Emobank`
+- `fb` (Facebook posts)
+- `nrc-vad`
+- `GlasgowNorms`
+- `word ratings ENG` (Warriner et al.)
+
+Note: `ANET` and `IEMOCAP` require separate access authorization, so they are not auto-downloaded.
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**
