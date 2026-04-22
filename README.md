@@ -249,6 +249,18 @@ https://drive.google.com/drive/folders/1BzdVmN51f33NHrdemJajz67MmlZljB2J?usp=sha
 
 ## Code
 
+### ET model setup (includes ET2 HF auto-download)
+
+Run once before training with gaze concat:
+
+```bash
+python setup_et_models.py --et2-checkpoint ./checkpoints/et_predictor2_seed123
+```
+
+If `./checkpoints/et_predictor2_seed123(.pt/.safetensors)` is missing, the setup script
+automatically downloads `et_predictor2_seed123.safetensors` from:
+`skboy/et_prediction_2` on Hugging Face.
+
 ### Build English-only dataset (from README links)
 
 If you want to run quickly with English data only, use:

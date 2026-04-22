@@ -6,7 +6,8 @@ ET model 1 (Huang & Hollenstein 2023):
   - SelectiveCacheForLM 레포에서 가중치 받아서 eyetrackpy 패키지 내부에 복사
 
 ET model 2 (Li & Rudzicz 2021):
-  - 사용자가 학습한 체크포인트(.pt / .safetensors) 경로를 환경변수로 등록
+  - 로컬 체크포인트가 없으면 HF(repo: skboy/et_prediction_2)에서 자동 다운로드
+  - 체크포인트(.pt / .safetensors) 경로를 환경변수로 등록
 """
 
 import argparse
@@ -14,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+from urllib.request import Request, urlopen
 
 
 def run(cmd, check=True):
@@ -75,17 +77,64 @@ def setup_et_model2(checkpoint_path):
 
     # .pt 또는 .safetensors 중 존재하는 것 탐색
     resolved = None
-    for ext in ["", ".safetensors", ".pt"]:
+    for ext in ["", ".safetensors", ".pt", ".bin"]:
         candidate = checkpoint_path + ext if not checkpoint_path.endswith(ext) else checkpoint_path
         if os.path.isfile(candidate):
             resolved = candidate
             break
 
+    return resolved
+
+
+def _download_et2_checkpoint_from_hf(destination_path, repo_id, filename):
+    url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+    os.makedirs(os.path.dirname(destination_path) or ".", exist_ok=True)
+    print(f"  로컬 체크포인트가 없어 HF에서 다운로드 시도: {url}")
+
+    req = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
+    )
+    with urlopen(req, timeout=120) as response, open(destination_path, "wb") as out_file:
+        shutil.copyfileobj(response, out_file)
+    return destination_path
+
+
+def resolve_or_download_et_model2(
+    checkpoint_path,
+    auto_download=True,
+    hf_repo_id="skboy/et_prediction_2",
+    hf_filename="et_predictor2_seed123.safetensors",
+):
+    resolved = setup_et_model2(checkpoint_path)
+
+    if resolved is None and auto_download:
+        # 확장자 없는 기본 경로면 .safetensors로 저장
+        if checkpoint_path.endswith((".safetensors", ".pt", ".bin")):
+            destination = checkpoint_path
+        else:
+            destination = checkpoint_path + ".safetensors"
+        try:
+            _download_et2_checkpoint_from_hf(destination, hf_repo_id, hf_filename)
+        except Exception as exc:
+            raise FileNotFoundError(
+                f"ET model 2 체크포인트를 찾을 수 없습니다: {checkpoint_path}[.pt/.safetensors]\n"
+                f"그리고 HF 자동 다운로드도 실패했습니다 ({hf_repo_id}/{hf_filename}).\n"
+                "네트워크 또는 파일명을 확인해주세요."
+            ) from exc
+        resolved = setup_et_model2(checkpoint_path)
+
     if resolved is None:
         raise FileNotFoundError(
             f"ET model 2 체크포인트를 찾을 수 없습니다: {checkpoint_path}[.pt/.safetensors]\n"
             "노트북에서 학습한 checkpoints/et_predictor2_seed123.pt (또는 .safetensors)를 "
-            "지정해주세요."
+            "지정하거나, --et2-hf-repo/--et2-hf-filename 옵션을 사용하세요."
         )
 
     print(f"  체크포인트 확인: {resolved} ({os.path.getsize(resolved)/1e6:.1f} MB)")
@@ -141,13 +190,33 @@ def main():
         "--clone-dir", default="./SelectiveCacheForLM",
         help="SelectiveCacheForLM 클론 경로"
     )
+    parser.add_argument(
+        "--no-et2-auto-download",
+        action="store_true",
+        help="로컬 ET2 체크포인트가 없을 때 HF 자동 다운로드를 비활성화",
+    )
+    parser.add_argument(
+        "--et2-hf-repo",
+        default="skboy/et_prediction_2",
+        help="ET2 자동 다운로드에 사용할 Hugging Face repo id",
+    )
+    parser.add_argument(
+        "--et2-hf-filename",
+        default="et_predictor2_seed123.safetensors",
+        help="ET2 자동 다운로드에 사용할 Hugging Face 파일명",
+    )
     args = parser.parse_args()
 
     if not args.skip_install:
         install_packages()
 
     setup_et_model1(args.clone_dir)
-    setup_et_model2(args.et2_checkpoint)
+    resolve_or_download_et_model2(
+        args.et2_checkpoint,
+        auto_download=not args.no_et2_auto_download,
+        hf_repo_id=args.et2_hf_repo,
+        hf_filename=args.et2_hf_filename,
+    )
     verify_setup()
 
     print("\n✓ 셋업 완료. 이제 train을 실행하세요.")
