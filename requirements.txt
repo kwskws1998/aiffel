@@ -113,3 +113,5 @@ torchviz==0.0.2
 tqdm==4.67.1
 transformers==4.40.0
 trl==0.9.6
+git+https://github.com/angelalopezcardona/tokenizer_aligner.git@v1.0.0
+git+https://github.com/angelalopezcardona/eyetrackpy.git@v1.0.0
