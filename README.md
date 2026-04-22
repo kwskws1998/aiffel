@@ -311,6 +311,17 @@ Included public English sources:
 
 Note: `ANET` and `IEMOCAP` require separate access authorization, so they are not auto-downloaded.
 
+If you have authorized TSV files (e.g., `iemocap.tsv`, `emotales.tsv`, `scott_et_al.tsv`),
+put them in `external_english/` and run:
+
+```bash
+python3 prepare_english_data.py --output-dir data --seed 42 --force
+```
+
+The builder auto-loads every `*.tsv` in `external_english/` when columns
+`text`, `valence`, and `arousal` are present.
+(`external_english/` is auto-created if missing.)
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**

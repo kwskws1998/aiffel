@@ -31,6 +31,18 @@ ENGLISH_SOURCES = {
     },
 }
 
+EXTERNAL_SOURCE_NAME_MAP = {
+    "iemocap": "IEMOCAP sentences",
+    "emotales": "EmoTales sentences",
+    "scott_et_al": "GlasgowNorms",
+    "nrc_vad": "nrc-vad",
+    "warriner_et_al": "word ratings ENG",
+    "facebook_va": "fb",
+    "fb": "fb",
+    "emobank": "Emobank",
+    "anet": "ANET sentences",
+}
+
 
 def _download_bytes(url, timeout=120):
     headers = {
@@ -146,8 +158,14 @@ def _post_process_dataset(df):
     out["arousal"] = pd.to_numeric(out["arousal"], errors="coerce")
     out = out.dropna(subset=["text", "valence", "arousal"])
     out = out[out["text"] != ""]
-    out["valence"] = _normalize_minmax(out["valence"])
-    out["arousal"] = _normalize_minmax(out["arousal"])
+    val_in_unit = out["valence"].between(0.0, 1.0, inclusive="both").all()
+    aro_in_unit = out["arousal"].between(0.0, 1.0, inclusive="both").all()
+    if val_in_unit and aro_in_unit:
+        out["valence"] = out["valence"].clip(0.0, 1.0)
+        out["arousal"] = out["arousal"].clip(0.0, 1.0)
+    else:
+        out["valence"] = _normalize_minmax(out["valence"])
+        out["arousal"] = _normalize_minmax(out["arousal"])
     out = out.dropna(subset=["valence", "arousal"])
     out = out.drop_duplicates(subset=["text", "dataset_of_origin"])
     return out
@@ -172,7 +190,59 @@ def _write_tsv(df, path):
     )
 
 
-def build_english_dataset(output_dir, seed, force=False):
+def _infer_external_dataset_name(path):
+    stem = os.path.splitext(os.path.basename(path))[0].lower().replace("-", "_")
+    return EXTERNAL_SOURCE_NAME_MAP.get(stem, stem)
+
+
+def _load_external_sources(external_dir):
+    if not external_dir:
+        return []
+    os.makedirs(external_dir, exist_ok=True)
+
+    files = sorted(
+        file_name
+        for file_name in os.listdir(external_dir)
+        if file_name.lower().endswith(".tsv")
+    )
+    if not files:
+        print(f"[external] No TSV files found in: {external_dir}")
+        return []
+
+    loaded = []
+    for file_name in files:
+        path = os.path.join(external_dir, file_name)
+        try:
+            df = pd.read_csv(path, sep="\t")
+        except Exception as exc:
+            print(f"[warn] Failed to read {path}: {exc}")
+            continue
+
+        required = {"text", "valence", "arousal"}
+        if not required.issubset(set(df.columns)):
+            print(f"[warn] Skip {path}: required columns are text, valence, arousal.")
+            continue
+
+        dataset_name = _infer_external_dataset_name(path)
+        out = pd.DataFrame(
+            {
+                "text": df["text"],
+                "valence": df["valence"],
+                "arousal": df["arousal"],
+                "dataset_of_origin": dataset_name,
+            }
+        )
+        out = _post_process_dataset(out)
+        if len(out) == 0:
+            print(f"[warn] Skip {path}: no valid rows after processing.")
+            continue
+
+        loaded.append(out)
+        print(f"[external] Loaded {file_name} -> {dataset_name}: {len(out)} rows")
+    return loaded
+
+
+def build_english_dataset(output_dir, seed, force=False, external_dir=None, external_only=False):
     fold1_path = os.path.join(output_dir, "full_dataset_fold1.csv")
     fold2_path = os.path.join(output_dir, "full_dataset_fold2.csv")
     merged_path = os.path.join(output_dir, "full_dataset_english_all.csv")
@@ -187,24 +257,35 @@ def build_english_dataset(output_dir, seed, force=False):
         print(f"Use --force to rebuild: {fold1_path}, {fold2_path}")
         return
 
-    emobank = _post_process_dataset(
-        _prepare_emobank(_download_bytes(ENGLISH_SOURCES["emobank"]["url"]))
-    )
-    facebook = _post_process_dataset(
-        _prepare_facebook(_download_bytes(ENGLISH_SOURCES["facebook"]["url"]))
-    )
-    nrc_vad = _post_process_dataset(
-        _prepare_nrc_vad(_download_bytes(ENGLISH_SOURCES["nrc_vad"]["url"]))
-    )
-    glasgow = _post_process_dataset(
-        _prepare_glasgow(_download_bytes(ENGLISH_SOURCES["glasgow"]["url"]))
-    )
-    warriner = _post_process_dataset(
-        _prepare_warriner(_download_bytes(ENGLISH_SOURCES["warriner"]["url"]))
-    )
+    dataframes = []
+    if not external_only:
+        emobank = _post_process_dataset(
+            _prepare_emobank(_download_bytes(ENGLISH_SOURCES["emobank"]["url"]))
+        )
+        facebook = _post_process_dataset(
+            _prepare_facebook(_download_bytes(ENGLISH_SOURCES["facebook"]["url"]))
+        )
+        nrc_vad = _post_process_dataset(
+            _prepare_nrc_vad(_download_bytes(ENGLISH_SOURCES["nrc_vad"]["url"]))
+        )
+        glasgow = _post_process_dataset(
+            _prepare_glasgow(_download_bytes(ENGLISH_SOURCES["glasgow"]["url"]))
+        )
+        warriner = _post_process_dataset(
+            _prepare_warriner(_download_bytes(ENGLISH_SOURCES["warriner"]["url"]))
+        )
+        dataframes.extend([emobank, facebook, nrc_vad, glasgow, warriner])
 
-    merged = pd.concat([emobank, facebook, nrc_vad, glasgow, warriner], ignore_index=True)
+    dataframes.extend(_load_external_sources(external_dir))
+    if not dataframes:
+        raise RuntimeError(
+            "No English datasets available. "
+            f"Add TSV files to {external_dir} or disable --external-only."
+        )
+
+    merged = pd.concat(dataframes, ignore_index=True)
     merged = merged[["text", "dataset_of_origin", "valence", "arousal"]]
+    merged = merged.drop_duplicates(subset=["text", "dataset_of_origin"])
 
     fold1, fold2 = _split_in_two_folds(merged, seed=seed)
 
@@ -246,5 +327,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Rebuild files even if full_dataset_fold1/2 and full_dataset_english_all already exist.",
     )
+    parser.add_argument(
+        "--external-dir",
+        default="external_english",
+        help="Optional folder with extra TSV files (text,valence,arousal).",
+    )
+    parser.add_argument(
+        "--external-only",
+        action="store_true",
+        help="Build folds from --external-dir TSV files only (skip web downloads).",
+    )
     args = parser.parse_args()
-    build_english_dataset(output_dir=args.output_dir, seed=args.seed, force=args.force)
+    build_english_dataset(
+        output_dir=args.output_dir,
+        seed=args.seed,
+        force=args.force,
+        external_dir=args.external_dir,
+        external_only=args.external_only,
+    )
