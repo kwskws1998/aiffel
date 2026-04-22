@@ -336,3 +336,14 @@ python train_model.py xlmroberta-base mse+ccc \
 
 For a full experiment matrix guide (model/loss/features/batch/optimizer combinations),
 see `README_experiments.md`.
+
+### Standalone benchmark: EmoBank
+
+You can run a separate fixed-split benchmark (train/dev/test) on EmoBank:
+
+```bash
+python benchmark_emobank.py xlmroberta-large mse --use-gaze-concat --et2-checkpoint ./checkpoints/et_predictor2_seed123
+```
+
+This script downloads EmoBank automatically (if needed), prepares split files under `data/emobank/`,
+trains on `train`, validates on `dev`, and reports final metrics on `test`.
