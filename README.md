@@ -254,7 +254,7 @@ https://drive.google.com/drive/folders/1BzdVmN51f33NHrdemJajz67MmlZljB2J?usp=sha
 Run this once on a fresh machine:
 
 ```bash
-bash bootstrap_env.sh
+bash install.sh
 ```
 
 What it does:
@@ -265,13 +265,13 @@ What it does:
 Re-run quickly without reinstalling deps:
 
 ```bash
-bash bootstrap_env.sh --no-deps
+SKIP_DEPS=1 bash install.sh
 ```
 
 If you also want ET model 1 assets:
 
 ```bash
-bash bootstrap_env.sh --with-et1
+WITH_ET1=1 bash install.sh
 ```
 
 ### ET model setup (includes ET2 HF auto-download)
