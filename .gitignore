@@ -134,6 +134,9 @@ data/
 Preds/
 wandb/
 logs/
+# Keep source package directory tracked even though generic data/ is ignored.
+!src/va_gaze/data/
+!src/va_gaze/data/*.py
 
 # Pyre type checker
 .pyre/
