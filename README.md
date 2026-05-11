@@ -358,12 +358,24 @@ If you prefer another dataset folder:
 python3 prepare_english_data.py --output-dir /path/to/my_data --seed 42 --force
 ```
 
+To exclude one or more source datasets while keeping the existing fold split:
+
+```bash
+python filter_datasets.py --input-dir data --output-dir data_no_iemocap --exclude IEMOCAP
+```
+
+Use the filtered folder during training/evaluation:
+
+```bash
+python train_model.py xlmroberta-large mse --data-dir data_no_iemocap
+```
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**
 - Loss function: **mse** or **ccc** or **robust** or **mse+ccc** or **robust+ccc**
 
-### GazeConcat (ET model 2) for VA
+### GazeConcat / GazeAdd (ET model 2) for VA
 
 You can enable Seeing Eye to AI-style concatenation of ET features with:
 
@@ -375,10 +387,22 @@ python train_model.py xlmroberta-base mse+ccc \
   --fp-dropout 0.1,0.3
 ```
 
+Or add the projected ET embeddings elementwise to the text embeddings with:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --use-gaze-add \
+  --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
+  --features-used 0,1,0,1,0 \
+  --fp-dropout 0.1,0.3
+```
+
 - `--use-gaze-concat`: enables gaze-text concatenation.
+- `--use-gaze-add`: enables gaze-text embedding addition.
 - `--et2-checkpoint`: path to your CMCL-RoBERTa ET2 checkpoint (`.pt` or `.safetensors`).
 - `--features-used`: feature flags in `nFix,FFD,GPT,TRT,fixProp` order.
 - `--fp-dropout`: dropout values for the ET feature projector.
+- `--use-gaze-concat` and `--use-gaze-add` are mutually exclusive.
 - with `--use-gaze-concat`, keep `--maxlen <= 255` (concat doubles sequence length).
 - checkpoint options:
   - `--save-total-limit` (default `1`) keeps only recent checkpoints to reduce disk usage.
@@ -402,6 +426,7 @@ Full CLI:
 ```bash
 python train_model.py <model> <loss> \
   [--use-gaze-concat] \
+  [--use-gaze-add] \
   [--et2-checkpoint <path>] \
   [--features-used <f1,f2,f3,f4,f5>] \
   [--fp-dropout <p1,p2>] \

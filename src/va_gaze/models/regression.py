@@ -286,3 +286,69 @@ class GazeConcatForSequenceRegression(nn.Module):
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
+
+
+class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        if input_ids is None:
+            raise ValueError("input_ids cannot be None.")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        embed_layer = self.encoder.get_input_embeddings()
+        model_device = embed_layer.weight.device
+        input_ids = input_ids.to(model_device)
+        attention_mask = attention_mask.to(model_device)
+
+        text_embeddings = embed_layer(input_ids)
+        fixations, _ = self._compute_fixations_batch(input_ids, attention_mask)
+        fixations = fixations.to(device=model_device, dtype=text_embeddings.dtype)
+
+        fixations_projected = self.fixations_embedding_projector(fixations)
+        fixations_projected = self.norm_layer_fix(fixations_projected)
+        inputs_embeds = text_embeddings + fixations_projected
+
+        encoder_kwargs = {
+            "input_ids": None,
+            "attention_mask": attention_mask,
+            "inputs_embeds": inputs_embeds,
+            "output_attentions": output_attentions,
+            "output_hidden_states": output_hidden_states,
+            "return_dict": True,
+        }
+        if head_mask is not None:
+            encoder_kwargs["head_mask"] = head_mask
+        if token_type_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["token_type_ids"] = token_type_ids
+        if position_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["position_ids"] = position_ids
+
+        encoder_outputs = self.encoder(**encoder_kwargs)
+        pooled_output = encoder_outputs.last_hidden_state[:, 0, :]
+        pooled_output = self.pre_classifier(pooled_output)
+        pooled_output = torch.relu(pooled_output)
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+        logits = self.sigmoid(logits)
+
+        if return_dict is False:
+            return (logits,)
+
+        return SequenceClassifierOutput(
+            loss=None,
+            logits=logits,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )

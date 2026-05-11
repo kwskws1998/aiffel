@@ -128,10 +128,13 @@ dmypy.json
 
 # input data, saved log, checkpoints
 data/
+data_smoke_gaze_add/
 Output Directory/
 model/
 data/
 Preds/
+checkpoints/
+.env_et
 wandb/
 logs/
 # Keep source package directory tracked even though generic data/ is ignored.

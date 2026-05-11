@@ -57,6 +57,7 @@ def _build_parser():
     parser.add_argument("model", choices=MODEL_CHOICES)
     parser.add_argument("loss", choices=LOSS_CHOICES)
     parser.add_argument("--use-gaze-concat", action="store_true")
+    parser.add_argument("--use-gaze-add", action="store_true")
     parser.add_argument("--et2-checkpoint", default=None)
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
@@ -107,6 +108,9 @@ def _validate_args(parser, args):
             _validate_positive_int("batch_size_xlmrL", args.batch_size_xlmrL)
     except ValueError as exc:
         parser.error(str(exc))
+
+    if args.use_gaze_concat and args.use_gaze_add:
+        parser.error("--use-gaze-concat and --use-gaze-add are mutually exclusive.")
 
     if args.use_gaze_concat and args.maxlen > 255:
         parser.error(
@@ -160,6 +164,7 @@ def main():
     checkpoint = MODEL_TO_CHECKPOINT[args.model]
     gaze_config = {
         "use_gaze_concat": args.use_gaze_concat,
+        "use_gaze_add": args.use_gaze_add,
         "et2_checkpoint_path": args.et2_checkpoint,
         "features_used": features_used,
         "fp_dropout": fp_dropout,
@@ -187,6 +192,7 @@ def main():
         "model": args.model,
         "loss_function": args.loss,
         "use_gaze_concat": gaze_config["use_gaze_concat"],
+        "use_gaze_add": gaze_config["use_gaze_add"],
         "et2_checkpoint_path": gaze_config["et2_checkpoint_path"],
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],

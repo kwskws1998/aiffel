@@ -11,6 +11,7 @@ from va_gaze.train.custom_trainer import (
 from va_gaze.eval.metrics import compute_metrics
 from va_gaze.models.regression import (
     DistilBertForSequenceClassificationSig,
+    GazeAddForSequenceRegression,
     GazeConcatForSequenceRegression,
     XLMRobertaForSequenceClassificationSig,
 )
@@ -37,8 +38,17 @@ def _select_batch_size(model_name, params):
 
 def _build_model(model_name, checkpoint, tokenizer, gaze_config):
     use_gaze_concat = bool(gaze_config.get("use_gaze_concat", False))
+    use_gaze_add = bool(gaze_config.get("use_gaze_add", False))
     if use_gaze_concat:
         return GazeConcatForSequenceRegression(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            et2_checkpoint_path=gaze_config.get("et2_checkpoint_path"),
+            features_used=gaze_config.get("features_used", [1, 1, 1, 1, 1]),
+            fp_dropout=tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
+        )
+    if use_gaze_add:
+        return GazeAddForSequenceRegression(
             checkpoint=checkpoint,
             tokenizer=tokenizer,
             et2_checkpoint_path=gaze_config.get("et2_checkpoint_path"),

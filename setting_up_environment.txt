@@ -59,6 +59,9 @@ Expected outputs:
 - data/full_dataset_fold2.csv
 - data/full_dataset_english_all.csv
 
+# Optional: exclude one or more source datasets while keeping existing folds
+python filter_datasets.py --input-dir data --output-dir data_no_iemocap --exclude IEMOCAP
+
 ==================================================
 4) TRAINING COMMANDS
 ==================================================
@@ -91,8 +94,21 @@ python train_model.py xlmroberta-large mse \
   --optim adamw_torch \
   --save-total-limit 1
 
+D) GazeAdd with fcomb2.2 (FFD+TRT)
+python train_model.py xlmroberta-large mse \
+  --use-gaze-add \
+  --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
+  --features-used 0,1,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --batch-size 8 \
+  --maxlen 200 \
+  --optim adamw_torch \
+  --save-total-limit 1
+
 Note:
 - With --use-gaze-concat, keep --maxlen <= 255.
+- --use-gaze-concat and --use-gaze-add are mutually exclusive.
+- To train/evaluate on a filtered dataset folder, add: --data-dir data_no_iemocap
 
 ==================================================
 5) METRICS AFTER TRAINING
@@ -150,6 +166,7 @@ Use these root commands (wrappers):
 - train_model.py
 - setup_et_models.py
 - prepare_english_data.py
+- filter_datasets.py
 - compute_overall_metrics.py
 
 Core implementation is under:
