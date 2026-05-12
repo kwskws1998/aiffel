@@ -54,6 +54,7 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config):
             et2_checkpoint_path=gaze_config.get("et2_checkpoint_path"),
             features_used=gaze_config.get("features_used", [1, 1, 1, 1, 1]),
             fp_dropout=tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
+            gaze_add_scale=gaze_config.get("gaze_add_scale", 0.05),
         )
 
     if model_name == "distilbert":

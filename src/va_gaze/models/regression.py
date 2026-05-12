@@ -289,6 +289,26 @@ class GazeConcatForSequenceRegression(nn.Module):
 
 
 class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
+    def __init__(
+        self,
+        checkpoint,
+        tokenizer,
+        et2_checkpoint_path=None,
+        features_used=None,
+        fp_dropout=(0.0, 0.3),
+        max_fix_cache_size=20000,
+        gaze_add_scale=0.05,
+    ):
+        super().__init__(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            et2_checkpoint_path=et2_checkpoint_path,
+            features_used=features_used,
+            fp_dropout=fp_dropout,
+            max_fix_cache_size=max_fix_cache_size,
+        )
+        self.gaze_add_scale = nn.Parameter(torch.tensor(float(gaze_add_scale)))
+
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -318,7 +338,9 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
 
         fixations_projected = self.fixations_embedding_projector(fixations)
         fixations_projected = self.norm_layer_fix(fixations_projected)
-        inputs_embeds = text_embeddings + fixations_projected
+        gaze_present = fixations.abs().sum(dim=-1, keepdim=True).gt(0).to(dtype=text_embeddings.dtype)
+        fixations_projected = fixations_projected * gaze_present
+        inputs_embeds = text_embeddings + self.gaze_add_scale * fixations_projected
 
         encoder_kwargs = {
             "input_ids": None,

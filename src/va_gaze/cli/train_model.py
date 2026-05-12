@@ -61,6 +61,7 @@ def _build_parser():
     parser.add_argument("--et2-checkpoint", default=None)
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
+    parser.add_argument("--gaze-add-scale", type=float, default=0.05)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--batch-size-distil", type=int, default=None)
     parser.add_argument("--batch-size-xlmrb", dest="batch_size_xlmrB", type=int, default=None)
@@ -108,6 +109,9 @@ def _validate_args(parser, args):
             _validate_positive_int("batch_size_xlmrL", args.batch_size_xlmrL)
     except ValueError as exc:
         parser.error(str(exc))
+
+    if args.gaze_add_scale < 0:
+        parser.error("gaze_add_scale must be >= 0.")
 
     if args.use_gaze_concat and args.use_gaze_add:
         parser.error("--use-gaze-concat and --use-gaze-add are mutually exclusive.")
@@ -168,6 +172,7 @@ def main():
         "et2_checkpoint_path": args.et2_checkpoint,
         "features_used": features_used,
         "fp_dropout": fp_dropout,
+        "gaze_add_scale": args.gaze_add_scale,
     }
 
     timestamp, preds_dir = _create_run_dir()
@@ -196,6 +201,7 @@ def main():
         "et2_checkpoint_path": gaze_config["et2_checkpoint_path"],
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],
+        "gaze_add_scale": gaze_config["gaze_add_scale"],
         "path": preds_dir,
         **params,
     }

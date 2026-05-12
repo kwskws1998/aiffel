@@ -89,6 +89,7 @@ python train_model.py xlmroberta-large mse \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
   --features-used 0,1,0,1,0 \
   --fp-dropout 0.1,0.3 \
+  --gaze-add-scale 0.05 \
   --batch-size 8 \
   --maxlen 200 \
   --optim adamw_torch \

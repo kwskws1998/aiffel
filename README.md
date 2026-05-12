@@ -394,7 +394,8 @@ python train_model.py xlmroberta-base mse+ccc \
   --use-gaze-add \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
   --features-used 0,1,0,1,0 \
-  --fp-dropout 0.1,0.3
+  --fp-dropout 0.1,0.3 \
+  --gaze-add-scale 0.05
 ```
 
 - `--use-gaze-concat`: enables gaze-text concatenation.
@@ -402,6 +403,7 @@ python train_model.py xlmroberta-base mse+ccc \
 - `--et2-checkpoint`: path to your CMCL-RoBERTa ET2 checkpoint (`.pt` or `.safetensors`).
 - `--features-used`: feature flags in `nFix,FFD,GPT,TRT,fixProp` order.
 - `--fp-dropout`: dropout values for the ET feature projector.
+- `--gaze-add-scale`: initial scale for GazeAdd's gaze residual (default `0.05`).
 - `--use-gaze-concat` and `--use-gaze-add` are mutually exclusive.
 - with `--use-gaze-concat`, keep `--maxlen <= 255` (concat doubles sequence length).
 - checkpoint options:
@@ -430,6 +432,7 @@ python train_model.py <model> <loss> \
   [--et2-checkpoint <path>] \
   [--features-used <f1,f2,f3,f4,f5>] \
   [--fp-dropout <p1,p2>] \
+  [--gaze-add-scale <float>] \
   [--batch-size <int>] \
   [--learning-rate <float>] \
   [--train-epochs <int>] \
