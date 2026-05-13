@@ -5,7 +5,10 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, DistilBertForSequenceClassification
 from transformers.modeling_outputs import SequenceClassifierOutput
-from transformers.models.roberta.modeling_roberta import RobertaForSequenceClassification
+from transformers.models.roberta.modeling_roberta import (
+    RobertaClassificationHead,
+    RobertaForSequenceClassification,
+)
 from transformers.models.xlm_roberta.configuration_xlm_roberta import XLMRobertaConfig
 
 
@@ -308,6 +311,19 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
             max_fix_cache_size=max_fix_cache_size,
         )
         self.gaze_add_scale = nn.Parameter(torch.tensor(float(gaze_add_scale)))
+        self.sigmoid = lambda x: torch.nn.functional.hardsigmoid(3 * x)
+        if self.config.model_type != "distilbert":
+            self.config.num_labels = self.num_labels
+            self.roberta_classifier = RobertaClassificationHead(self.config)
+            self._init_roberta_classifier()
+
+    def _init_roberta_classifier(self):
+        initializer_range = getattr(self.config, "initializer_range", 0.02)
+        for module in self.roberta_classifier.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
 
     def forward(
         self,
@@ -358,11 +374,14 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
             encoder_kwargs["position_ids"] = position_ids
 
         encoder_outputs = self.encoder(**encoder_kwargs)
-        pooled_output = encoder_outputs.last_hidden_state[:, 0, :]
-        pooled_output = self.pre_classifier(pooled_output)
-        pooled_output = torch.relu(pooled_output)
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
+        if self.config.model_type == "distilbert":
+            pooled_output = encoder_outputs.last_hidden_state[:, 0, :]
+            pooled_output = self.pre_classifier(pooled_output)
+            pooled_output = torch.relu(pooled_output)
+            pooled_output = self.dropout(pooled_output)
+            logits = self.classifier(pooled_output)
+        else:
+            logits = self.roberta_classifier(encoder_outputs.last_hidden_state)
         logits = self.sigmoid(logits)
 
         if return_dict is False:
