@@ -89,6 +89,7 @@ class GazeConcatForSequenceRegression(nn.Module):
         features_used=None,
         fp_dropout=(0.0, 0.3),
         max_fix_cache_size=20000,
+        load_fixation_model=True,
     ):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(checkpoint)
@@ -128,7 +129,7 @@ class GazeConcatForSequenceRegression(nn.Module):
         self.eye_end = nn.Parameter(torch.zeros(self.hidden_size))
         self.fixation_cache = OrderedDict()
         self.max_fix_cache_size = max_fix_cache_size
-        self.fp_model = self._load_et2_predictor(et2_checkpoint_path)
+        self.fp_model = self._load_et2_predictor(et2_checkpoint_path) if load_fixation_model else None
 
     def _load_et2_predictor(self, et2_checkpoint_path):
         try:
@@ -301,7 +302,9 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
         fp_dropout=(0.0, 0.3),
         max_fix_cache_size=20000,
         gaze_add_scale=0.05,
+        train_gaze_add_scale=False,
     ):
+        skip_fixed_zero_gaze = not train_gaze_add_scale and float(gaze_add_scale) == 0.0
         super().__init__(
             checkpoint=checkpoint,
             tokenizer=tokenizer,
@@ -309,8 +312,14 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
             features_used=features_used,
             fp_dropout=fp_dropout,
             max_fix_cache_size=max_fix_cache_size,
+            load_fixation_model=not skip_fixed_zero_gaze,
         )
-        self.gaze_add_scale = nn.Parameter(torch.tensor(float(gaze_add_scale)))
+        self.skip_fixed_zero_gaze = skip_fixed_zero_gaze
+        gaze_add_scale = torch.tensor(float(gaze_add_scale))
+        if train_gaze_add_scale:
+            self.gaze_add_scale = nn.Parameter(gaze_add_scale)
+        else:
+            self.register_buffer("gaze_add_scale", gaze_add_scale)
         self.sigmoid = lambda x: torch.nn.functional.hardsigmoid(3 * x)
         if self.config.model_type != "distilbert":
             self.config.num_labels = self.num_labels
@@ -349,14 +358,17 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
         attention_mask = attention_mask.to(model_device)
 
         text_embeddings = embed_layer(input_ids)
-        fixations, _ = self._compute_fixations_batch(input_ids, attention_mask)
-        fixations = fixations.to(device=model_device, dtype=text_embeddings.dtype)
+        if self.skip_fixed_zero_gaze:
+            inputs_embeds = text_embeddings
+        else:
+            fixations, _ = self._compute_fixations_batch(input_ids, attention_mask)
+            fixations = fixations.to(device=model_device, dtype=text_embeddings.dtype)
 
-        fixations_projected = self.fixations_embedding_projector(fixations)
-        fixations_projected = self.norm_layer_fix(fixations_projected)
-        gaze_present = fixations.abs().sum(dim=-1, keepdim=True).gt(0).to(dtype=text_embeddings.dtype)
-        fixations_projected = fixations_projected * gaze_present
-        inputs_embeds = text_embeddings + self.gaze_add_scale * fixations_projected
+            fixations_projected = self.fixations_embedding_projector(fixations)
+            fixations_projected = self.norm_layer_fix(fixations_projected)
+            gaze_present = fixations.abs().sum(dim=-1, keepdim=True).gt(0).to(dtype=text_embeddings.dtype)
+            fixations_projected = fixations_projected * gaze_present
+            inputs_embeds = text_embeddings + self.gaze_add_scale * fixations_projected
 
         encoder_kwargs = {
             "input_ids": None,

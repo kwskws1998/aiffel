@@ -62,12 +62,14 @@ def _build_parser():
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
     parser.add_argument("--gaze-add-scale", type=float, default=0.05)
+    parser.add_argument("--train-gaze-add-scale", action="store_true")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--batch-size-distil", type=int, default=None)
     parser.add_argument("--batch-size-xlmrb", dest="batch_size_xlmrB", type=int, default=None)
     parser.add_argument("--batch-size-xlmrl", dest="batch_size_xlmrL", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=6e-6)
     parser.add_argument("--train-epochs", type=int, default=10)
+    parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--optim", type=str, default="adamw_torch")
@@ -77,6 +79,8 @@ def _build_parser():
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument("--save-strategy", choices=["epoch", "no"], default="epoch")
     parser.add_argument("--save-total-limit", type=int, default=1)
+    parser.add_argument("--save-final-model", dest="save_final_model", action="store_true")
+    parser.add_argument("--no-save-final-model", dest="save_final_model", action="store_false")
     parser.add_argument(
         "--load-best-model-at-end",
         dest="load_best_model_at_end",
@@ -88,6 +92,7 @@ def _build_parser():
         action="store_false",
     )
     parser.set_defaults(load_best_model_at_end=True)
+    parser.set_defaults(save_final_model=True)
     return parser
 
 
@@ -99,6 +104,8 @@ def _validate_args(parser, args):
         _validate_positive_int("gradient_accumulation_steps", args.gradient_accumulation_steps)
         _validate_positive_int("maxlen", args.maxlen)
         _validate_positive_int("save_total_limit", args.save_total_limit)
+        if args.max_steps < -1 or args.max_steps == 0:
+            raise ValueError("max_steps must be -1 or > 0.")
         if args.batch_size is not None:
             _validate_positive_int("batch_size", args.batch_size)
         if args.batch_size_distil is not None:
@@ -173,6 +180,7 @@ def main():
         "features_used": features_used,
         "fp_dropout": fp_dropout,
         "gaze_add_scale": args.gaze_add_scale,
+        "train_gaze_add_scale": args.train_gaze_add_scale,
     }
 
     timestamp, preds_dir = _create_run_dir()
@@ -182,6 +190,7 @@ def main():
         "batch_size_xlmrL": batch_size_xlmrL,
         "lr": args.learning_rate,
         "train_epochs": args.train_epochs,
+        "max_steps": args.max_steps,
         "weight_decay": args.weight_decay,
         "warmup_ratio": args.warmup_ratio,
         "optim": args.optim,
@@ -190,6 +199,7 @@ def main():
         "maxlen": args.maxlen,
         "save_strategy": args.save_strategy,
         "save_total_limit": args.save_total_limit,
+        "save_final_model": args.save_final_model,
         "load_best_model_at_end": args.load_best_model_at_end,
         "data_dir": args.data_dir,
     }
@@ -202,6 +212,7 @@ def main():
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],
         "gaze_add_scale": gaze_config["gaze_add_scale"],
+        "train_gaze_add_scale": gaze_config["train_gaze_add_scale"],
         "path": preds_dir,
         **params,
     }

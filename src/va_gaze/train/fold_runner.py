@@ -55,6 +55,7 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config):
             features_used=gaze_config.get("features_used", [1, 1, 1, 1, 1]),
             fp_dropout=tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
             gaze_add_scale=gaze_config.get("gaze_add_scale", 0.05),
+            train_gaze_add_scale=gaze_config.get("train_gaze_add_scale", False),
         )
 
     if model_name == "distilbert":
@@ -77,6 +78,7 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         num_train_epochs=params["train_epochs"],
+        max_steps=params.get("max_steps", -1),
         learning_rate=params["lr"],
         weight_decay=params["weight_decay"],
         optim=params.get("optim", "adamw_torch"),
@@ -139,4 +141,5 @@ def run_fold(
         for key, value in predictions.metrics.items():
             output_file.write(f"{key},{value}\n")
 
-    trainer.save_model(model_dir)
+    if params.get("save_final_model", True):
+        trainer.save_model(model_dir)
