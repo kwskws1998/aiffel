@@ -129,14 +129,20 @@ dmypy.json
 # input data, saved log, checkpoints
 data/
 data_smoke_gaze_add/
+data_no_iemocap/
 Output Directory/
 model/
-data/
 Preds/
 checkpoints/
 .env_et
 wandb/
 logs/
+artifacts/
+hf_checks/
+result_packages/
+*.zip
+*.pt
+*.safetensors
 # Keep source package directory tracked even though generic data/ is ignored.
 !src/va_gaze/data/
 !src/va_gaze/data/*.py

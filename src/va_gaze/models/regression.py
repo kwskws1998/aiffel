@@ -11,6 +11,16 @@ from transformers.models.roberta.modeling_roberta import (
 )
 from transformers.models.xlm_roberta.configuration_xlm_roberta import XLMRobertaConfig
 
+from va_gaze.models.gaze_transform import GazeFeatureTransformer
+
+
+def _normalize_et_model_type(raw_value):
+    aliases = {
+        "emotion_et": "emotion-et",
+        "et_meco": "et-meco",
+    }
+    return aliases.get(raw_value or "et2", raw_value or "et2")
+
 
 class DistilBertForSequenceClassificationSig(DistilBertForSequenceClassification):
     def __init__(self, *args, **kwargs):
@@ -90,6 +100,12 @@ class GazeConcatForSequenceRegression(nn.Module):
         fp_dropout=(0.0, 0.3),
         max_fix_cache_size=20000,
         load_fixation_model=True,
+        et_model_type="et2",
+        et_model_id=None,
+        gaze_transform="raw",
+        gaze_artifact_dir=None,
+        pca_components=2,
+        gmm_components=5,
     ):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(checkpoint)
@@ -97,15 +113,31 @@ class GazeConcatForSequenceRegression(nn.Module):
         self.tokenizer = tokenizer
         self.hidden_size = self.config.hidden_size
         self.num_labels = 2
+        self.et_model_type = _normalize_et_model_type(et_model_type)
+        self.gaze_transform_name = gaze_transform or "raw"
+        self.feature_indices = None
+        self.fp_model = None
 
-        flags = features_used or [1, 1, 1, 1, 1]
-        self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
-        if not self.feature_indices:
-            raise ValueError("features_used must enable at least one ET feature.")
+        raw_feature_dim = self._configure_fixation_source(
+            et2_checkpoint_path=et2_checkpoint_path,
+            et_model_id=et_model_id,
+            features_used=features_used,
+            load_fixation_model=load_fixation_model,
+        )
+        self.selected_gaze_feature_dim = raw_feature_dim
+        self.gaze_feature_transformer = GazeFeatureTransformer(
+            transform=self.gaze_transform_name,
+            raw_feature_dim=raw_feature_dim,
+            artifact_dir=gaze_artifact_dir,
+            artifact_repo_id=et_model_id,
+            pca_components=pca_components,
+            gmm_components=gmm_components,
+        )
+        self.gaze_feature_dim = self.gaze_feature_transformer.output_dim
 
         p_1, p_2 = fp_dropout
         self.fixations_embedding_projector = nn.Sequential(
-            nn.Linear(len(self.feature_indices), 128),
+            nn.Linear(self.gaze_feature_dim, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(p=p_1),
@@ -129,7 +161,39 @@ class GazeConcatForSequenceRegression(nn.Module):
         self.eye_end = nn.Parameter(torch.zeros(self.hidden_size))
         self.fixation_cache = OrderedDict()
         self.max_fix_cache_size = max_fix_cache_size
-        self.fp_model = self._load_et2_predictor(et2_checkpoint_path) if load_fixation_model else None
+
+    def _configure_fixation_source(
+        self,
+        et2_checkpoint_path=None,
+        et_model_id=None,
+        features_used=None,
+        load_fixation_model=True,
+    ):
+        if self.et_model_type in ("et2", "legacy-et2"):
+            flags = features_used or [1, 1, 1, 1, 1]
+            self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
+            if not self.feature_indices:
+                raise ValueError("features_used must enable at least one ET feature.")
+            if load_fixation_model:
+                self.fp_model = self._load_et2_predictor(et2_checkpoint_path)
+            return len(self.feature_indices)
+
+        if self.et_model_type == "emotion-et":
+            flags = features_used or [1, 1, 1, 1, 1]
+            self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
+            if not self.feature_indices:
+                raise ValueError("features_used must enable at least one ET feature.")
+            if load_fixation_model:
+                self.fp_model = self._load_emotion_et_predictor(et_model_id or et2_checkpoint_path)
+            return len(self.feature_indices)
+
+        if self.et_model_type == "et-meco":
+            if load_fixation_model:
+                self.fp_model = self._load_et_meco_predictor(et_model_id or et2_checkpoint_path)
+                return int(self.fp_model.feature_dim)
+            return 8
+
+        raise ValueError(f"Unknown et_model_type: {self.et_model_type}")
 
     def _load_et2_predictor(self, et2_checkpoint_path):
         try:
@@ -150,6 +214,42 @@ class GazeConcatForSequenceRegression(nn.Module):
                 param.requires_grad = False
         return fp_model
 
+    def _load_emotion_et_predictor(self, et_model_id):
+        try:
+            from va_gaze.models.emotion_et_wrapper import EmotionEtFixationsPredictor
+        except ImportError as exc:
+            raise ImportError(
+                "Could not import EmotionEtFixationsPredictor. Install huggingface_hub/safetensors/transformers."
+            ) from exc
+
+        fp_model = EmotionEtFixationsPredictor(
+            modelTokenizer=self.tokenizer,
+            model_id=et_model_id,
+        )
+        if hasattr(fp_model, "model"):
+            fp_model.model.eval()
+            for param in fp_model.model.parameters():
+                param.requires_grad = False
+        return fp_model
+
+    def _load_et_meco_predictor(self, et_model_id):
+        try:
+            from va_gaze.models.et_meco_wrapper import MecoFixationsPredictor
+        except ImportError as exc:
+            raise ImportError(
+                "Could not import MecoFixationsPredictor. Install et_meco or set ET_MECO_PACKAGE_ROOT."
+            ) from exc
+
+        fp_model = MecoFixationsPredictor(
+            modelTokenizer=self.tokenizer,
+            checkpoint_path=et_model_id,
+        )
+        if hasattr(fp_model, "predictor") and hasattr(fp_model.predictor, "model"):
+            fp_model.predictor.model.eval()
+            for param in fp_model.predictor.model.parameters():
+                param.requires_grad = False
+        return fp_model
+
     @staticmethod
     def _build_cache_key(token_ids_1d, attention_mask_1d):
         valid_len = int(attention_mask_1d.sum().item())
@@ -164,7 +264,7 @@ class GazeConcatForSequenceRegression(nn.Module):
 
         if valid_len <= 0:
             return (
-                torch.zeros(seq_len, len(self.feature_indices), dtype=torch.float32, device=device),
+                torch.zeros(seq_len, self.selected_gaze_feature_dim, dtype=torch.float32, device=device),
                 torch.zeros(seq_len, dtype=attention_mask_1d.dtype, device=device),
             )
 
@@ -179,7 +279,8 @@ class GazeConcatForSequenceRegression(nn.Module):
 
             fixations = fixations.squeeze(0).float().cpu()
             fixation_mask = fixation_mask.squeeze(0).long().cpu()
-            fixations = fixations[:, self.feature_indices]
+            if self.feature_indices is not None:
+                fixations = fixations[:, self.feature_indices]
 
             if len(self.fixation_cache) >= self.max_fix_cache_size:
                 self.fixation_cache.popitem(last=False)
@@ -192,7 +293,7 @@ class GazeConcatForSequenceRegression(nn.Module):
         fixation_mask = fixation_mask.to(device=device, dtype=attention_mask_1d.dtype)
 
         padded_fixations = torch.zeros(
-            seq_len, len(self.feature_indices), dtype=fixations.dtype, device=device
+            seq_len, self.selected_gaze_feature_dim, dtype=fixations.dtype, device=device
         )
         padded_mask = torch.zeros(seq_len, dtype=attention_mask_1d.dtype, device=device)
 
@@ -210,7 +311,10 @@ class GazeConcatForSequenceRegression(nn.Module):
             )
             batch_fixations.append(row_fix)
             batch_masks.append(row_mask)
-        return torch.stack(batch_fixations, dim=0), torch.stack(batch_masks, dim=0)
+        fixations = torch.stack(batch_fixations, dim=0)
+        masks = torch.stack(batch_masks, dim=0)
+        fixations = self.gaze_feature_transformer.transform_tensor(fixations, masks)
+        return fixations, masks
 
     def forward(
         self,
@@ -303,6 +407,12 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
         max_fix_cache_size=20000,
         gaze_add_scale=0.05,
         train_gaze_add_scale=False,
+        et_model_type="et2",
+        et_model_id=None,
+        gaze_transform="raw",
+        gaze_artifact_dir=None,
+        pca_components=2,
+        gmm_components=5,
     ):
         skip_fixed_zero_gaze = not train_gaze_add_scale and float(gaze_add_scale) == 0.0
         super().__init__(
@@ -313,6 +423,12 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
             fp_dropout=fp_dropout,
             max_fix_cache_size=max_fix_cache_size,
             load_fixation_model=not skip_fixed_zero_gaze,
+            et_model_type=et_model_type,
+            et_model_id=et_model_id,
+            gaze_transform=gaze_transform,
+            gaze_artifact_dir=gaze_artifact_dir,
+            pca_components=pca_components,
+            gmm_components=gmm_components,
         )
         self.skip_fixed_zero_gaze = skip_fixed_zero_gaze
         gaze_add_scale = torch.tensor(float(gaze_add_scale))
@@ -369,6 +485,125 @@ class GazeAddForSequenceRegression(GazeConcatForSequenceRegression):
             gaze_present = fixations.abs().sum(dim=-1, keepdim=True).gt(0).to(dtype=text_embeddings.dtype)
             fixations_projected = fixations_projected * gaze_present
             inputs_embeds = text_embeddings + self.gaze_add_scale * fixations_projected
+
+        encoder_kwargs = {
+            "input_ids": None,
+            "attention_mask": attention_mask,
+            "inputs_embeds": inputs_embeds,
+            "output_attentions": output_attentions,
+            "output_hidden_states": output_hidden_states,
+            "return_dict": True,
+        }
+        if head_mask is not None:
+            encoder_kwargs["head_mask"] = head_mask
+        if token_type_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["token_type_ids"] = token_type_ids
+        if position_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["position_ids"] = position_ids
+
+        encoder_outputs = self.encoder(**encoder_kwargs)
+        if self.config.model_type == "distilbert":
+            pooled_output = encoder_outputs.last_hidden_state[:, 0, :]
+            pooled_output = self.pre_classifier(pooled_output)
+            pooled_output = torch.relu(pooled_output)
+            pooled_output = self.dropout(pooled_output)
+            logits = self.classifier(pooled_output)
+        else:
+            logits = self.roberta_classifier(encoder_outputs.last_hidden_state)
+        logits = self.sigmoid(logits)
+
+        if return_dict is False:
+            return (logits,)
+
+        return SequenceClassifierOutput(
+            loss=None,
+            logits=logits,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
+
+
+class GazeGmmAdapterForSequenceRegression(GazeAddForSequenceRegression):
+    def __init__(
+        self,
+        checkpoint,
+        tokenizer,
+        et2_checkpoint_path=None,
+        features_used=None,
+        fp_dropout=(0.0, 0.3),
+        max_fix_cache_size=20000,
+        gaze_add_scale=0.05,
+        train_gaze_add_scale=False,
+        et_model_type="et-meco",
+        et_model_id=None,
+        gaze_transform=None,
+        gaze_artifact_dir=None,
+        pca_components=2,
+        gmm_components=5,
+    ):
+        super().__init__(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            et2_checkpoint_path=et2_checkpoint_path,
+            features_used=features_used,
+            fp_dropout=fp_dropout,
+            max_fix_cache_size=max_fix_cache_size,
+            gaze_add_scale=gaze_add_scale,
+            train_gaze_add_scale=train_gaze_add_scale,
+            et_model_type=et_model_type,
+            et_model_id=et_model_id,
+            gaze_transform="gmm",
+            gaze_artifact_dir=gaze_artifact_dir,
+            pca_components=pca_components,
+            gmm_components=gmm_components,
+        )
+        self.gmm_adapters = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(self.hidden_size, self.hidden_size),
+                    nn.GELU(),
+                    nn.Dropout(fp_dropout[1]),
+                    nn.Linear(self.hidden_size, self.hidden_size),
+                )
+                for _ in range(self.gaze_feature_dim)
+            ]
+        )
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        if input_ids is None:
+            raise ValueError("input_ids cannot be None.")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        embed_layer = self.encoder.get_input_embeddings()
+        model_device = embed_layer.weight.device
+        input_ids = input_ids.to(model_device)
+        attention_mask = attention_mask.to(model_device)
+
+        text_embeddings = embed_layer(input_ids)
+        fixations, fixation_attention = self._compute_fixations_batch(input_ids, attention_mask)
+        fixations = fixations.to(device=model_device, dtype=text_embeddings.dtype)
+        fixation_attention = fixation_attention.to(device=model_device, dtype=text_embeddings.dtype)
+
+        adapter_outputs = torch.stack(
+            [adapter(text_embeddings) for adapter in self.gmm_adapters],
+            dim=2,
+        )
+        residual = (adapter_outputs * fixations.unsqueeze(-1)).sum(dim=2)
+        residual = residual * fixation_attention.unsqueeze(-1)
+        inputs_embeds = text_embeddings + self.gaze_add_scale * residual
 
         encoder_kwargs = {
             "input_ids": None,

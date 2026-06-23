@@ -1,0 +1,14 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+.DS_Store
+.env
+runs/
+artifacts/
+
+data/*
+!data/pretrain_data/
+!data/pretrain_data/*.csv
+!data/finetune_data/
+!data/finetune_data/*.csv
+!data/finetune_data/*.json

@@ -15,6 +15,9 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 MODEL_CHOICES = ["distilbert", "xlmroberta-base", "xlmroberta-large"]
 LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc"]
+ET_MODEL_CHOICES = ["et2", "emotion-et", "emotion_et", "et-meco", "et_meco"]
+GAZE_TRANSFORM_CHOICES = ["raw", "pca", "gmm"]
+GAZE_FUSION_CHOICES = ["concat", "add", "gmm-adapter"]
 MODEL_TO_CHECKPOINT = {
     "distilbert": "distilbert-base-multilingual-cased",
     "xlmroberta-base": "xlm-roberta-base",
@@ -52,6 +55,14 @@ def _validate_positive_int(name, value):
     return value
 
 
+def _normalize_et_model_type(raw_value):
+    aliases = {
+        "emotion_et": "emotion-et",
+        "et_meco": "et-meco",
+    }
+    return aliases.get(raw_value, raw_value)
+
+
 def _build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", choices=MODEL_CHOICES)
@@ -59,6 +70,13 @@ def _build_parser():
     parser.add_argument("--use-gaze-concat", action="store_true")
     parser.add_argument("--use-gaze-add", action="store_true")
     parser.add_argument("--et2-checkpoint", default=None)
+    parser.add_argument("--et-model-type", choices=ET_MODEL_CHOICES, default="et2")
+    parser.add_argument("--et-model-id", default=None)
+    parser.add_argument("--gaze-transform", choices=GAZE_TRANSFORM_CHOICES, default="raw")
+    parser.add_argument("--gaze-fusion", choices=GAZE_FUSION_CHOICES, default=None)
+    parser.add_argument("--gaze-artifact-dir", default=None)
+    parser.add_argument("--gmm-components", type=int, default=5)
+    parser.add_argument("--pca-components", type=int, default=2)
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
     parser.add_argument("--gaze-add-scale", type=float, default=0.05)
@@ -97,6 +115,8 @@ def _build_parser():
 
 
 def _validate_args(parser, args):
+    args.et_model_type = _normalize_et_model_type(args.et_model_type)
+
     try:
         features_used = _parse_features_used(args.features_used)
         fp_dropout = _parse_fp_dropout(args.fp_dropout)
@@ -123,10 +143,37 @@ def _validate_args(parser, args):
     if args.use_gaze_concat and args.use_gaze_add:
         parser.error("--use-gaze-concat and --use-gaze-add are mutually exclusive.")
 
-    if args.use_gaze_concat and args.maxlen > 255:
+    if args.gaze_fusion and (args.use_gaze_concat or args.use_gaze_add):
+        parser.error("Use either --gaze-fusion or legacy --use-gaze-concat/--use-gaze-add, not both.")
+
+    resolved_fusion = args.gaze_fusion
+    if resolved_fusion is None:
+        if args.use_gaze_concat:
+            resolved_fusion = "concat"
+        elif args.use_gaze_add:
+            resolved_fusion = "add"
+
+    if resolved_fusion == "concat" and args.maxlen > 255:
         parser.error(
-            "When --use-gaze-concat is enabled, maxlen must be <= 255 to avoid positional limit overflow."
+            "When gaze concat is enabled, maxlen must be <= 255 to avoid positional limit overflow."
         )
+
+    if args.et_model_type == "et-meco" and resolved_fusion and not args.et_model_id:
+        parser.error("--et-model-id is required when --et-model-type et-meco is used.")
+
+    if args.et_model_type in ("et2", "emotion-et") and args.gaze_transform != "raw":
+        parser.error("PCA/GMM transforms are currently supported for --et-model-type et-meco only.")
+
+    if resolved_fusion == "gmm-adapter":
+        if args.et_model_type != "et-meco":
+            parser.error("--gaze-fusion gmm-adapter requires --et-model-type et-meco.")
+        if args.gaze_transform not in ("raw", "gmm"):
+            parser.error("--gaze-fusion gmm-adapter uses GMM posterior and cannot use PCA.")
+        args.gaze_transform = "gmm"
+    args.gaze_fusion = resolved_fusion
+
+    _validate_positive_int("gmm_components", args.gmm_components)
+    _validate_positive_int("pca_components", args.pca_components)
 
     if args.save_strategy == "no" and args.load_best_model_at_end:
         args.load_best_model_at_end = False
@@ -177,6 +224,13 @@ def main():
         "use_gaze_concat": args.use_gaze_concat,
         "use_gaze_add": args.use_gaze_add,
         "et2_checkpoint_path": args.et2_checkpoint,
+        "et_model_type": args.et_model_type,
+        "et_model_id": args.et_model_id,
+        "gaze_transform": args.gaze_transform,
+        "gaze_fusion": args.gaze_fusion,
+        "gaze_artifact_dir": args.gaze_artifact_dir,
+        "gmm_components": args.gmm_components,
+        "pca_components": args.pca_components,
         "features_used": features_used,
         "fp_dropout": fp_dropout,
         "gaze_add_scale": args.gaze_add_scale,
@@ -209,6 +263,13 @@ def main():
         "use_gaze_concat": gaze_config["use_gaze_concat"],
         "use_gaze_add": gaze_config["use_gaze_add"],
         "et2_checkpoint_path": gaze_config["et2_checkpoint_path"],
+        "et_model_type": gaze_config["et_model_type"],
+        "et_model_id": gaze_config["et_model_id"],
+        "gaze_transform": gaze_config["gaze_transform"],
+        "gaze_fusion": gaze_config["gaze_fusion"],
+        "gaze_artifact_dir": gaze_config["gaze_artifact_dir"],
+        "gmm_components": gaze_config["gmm_components"],
+        "pca_components": gaze_config["pca_components"],
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],
         "gaze_add_scale": gaze_config["gaze_add_scale"],

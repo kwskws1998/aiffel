@@ -13,6 +13,7 @@ from va_gaze.models.regression import (
     DistilBertForSequenceClassificationSig,
     GazeAddForSequenceRegression,
     GazeConcatForSequenceRegression,
+    GazeGmmAdapterForSequenceRegression,
     XLMRobertaForSequenceClassificationSig,
 )
 
@@ -37,25 +38,48 @@ def _select_batch_size(model_name, params):
 
 
 def _build_model(model_name, checkpoint, tokenizer, gaze_config):
-    use_gaze_concat = bool(gaze_config.get("use_gaze_concat", False))
-    use_gaze_add = bool(gaze_config.get("use_gaze_add", False))
-    if use_gaze_concat:
+    gaze_fusion = gaze_config.get("gaze_fusion")
+    if not gaze_fusion:
+        if bool(gaze_config.get("use_gaze_concat", False)):
+            gaze_fusion = "concat"
+        elif bool(gaze_config.get("use_gaze_add", False)):
+            gaze_fusion = "add"
+        else:
+            gaze_fusion = "none"
+
+    shared_gaze_kwargs = {
+        "et2_checkpoint_path": gaze_config.get("et2_checkpoint_path"),
+        "features_used": gaze_config.get("features_used", [1, 1, 1, 1, 1]),
+        "fp_dropout": tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
+        "et_model_type": gaze_config.get("et_model_type", "et2"),
+        "et_model_id": gaze_config.get("et_model_id"),
+        "gaze_transform": gaze_config.get("gaze_transform", "raw"),
+        "gaze_artifact_dir": gaze_config.get("gaze_artifact_dir"),
+        "pca_components": gaze_config.get("pca_components", 2),
+        "gmm_components": gaze_config.get("gmm_components", 5),
+    }
+
+    if gaze_fusion == "concat":
         return GazeConcatForSequenceRegression(
             checkpoint=checkpoint,
             tokenizer=tokenizer,
-            et2_checkpoint_path=gaze_config.get("et2_checkpoint_path"),
-            features_used=gaze_config.get("features_used", [1, 1, 1, 1, 1]),
-            fp_dropout=tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
+            **shared_gaze_kwargs,
         )
-    if use_gaze_add:
+    if gaze_fusion == "add":
         return GazeAddForSequenceRegression(
             checkpoint=checkpoint,
             tokenizer=tokenizer,
-            et2_checkpoint_path=gaze_config.get("et2_checkpoint_path"),
-            features_used=gaze_config.get("features_used", [1, 1, 1, 1, 1]),
-            fp_dropout=tuple(gaze_config.get("fp_dropout", [0.0, 0.3])),
             gaze_add_scale=gaze_config.get("gaze_add_scale", 0.05),
             train_gaze_add_scale=gaze_config.get("train_gaze_add_scale", False),
+            **shared_gaze_kwargs,
+        )
+    if gaze_fusion == "gmm-adapter":
+        return GazeGmmAdapterForSequenceRegression(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            gaze_add_scale=gaze_config.get("gaze_add_scale", 0.05),
+            train_gaze_add_scale=gaze_config.get("train_gaze_add_scale", False),
+            **shared_gaze_kwargs,
         )
 
     if model_name == "distilbert":

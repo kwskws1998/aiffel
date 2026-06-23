@@ -431,6 +431,13 @@ python train_model.py <model> <loss> \
   [--use-gaze-concat] \
   [--use-gaze-add] \
   [--et2-checkpoint <path>] \
+  [--et-model-type et2|emotion-et|et-meco] \
+  [--et-model-id <hf_repo_or_local_path>] \
+  [--gaze-transform raw|pca|gmm] \
+  [--gaze-fusion concat|add|gmm-adapter] \
+  [--gaze-artifact-dir <path>] \
+  [--gmm-components <int>] \
+  [--pca-components <int>] \
   [--features-used <f1,f2,f3,f4,f5>] \
   [--fp-dropout <p1,p2>] \
   [--gaze-add-scale <float>] \
@@ -454,6 +461,108 @@ Examples:
 - fcomb2.2 (FFD+TRT): `0,1,0,1,0`
 - TRT only: `0,0,0,1,0`
 - FFD only: `0,1,0,0,0`
+
+### Emotion ET predictor for VA gaze fusion
+
+The emotion-specific ET predictor on Hugging Face can be used as a drop-in
+replacement for ET2. It predicts the same five features in
+`nFix,FFD,GPT,TRT,fixProp` order, so the existing `--features-used` flags still
+apply.
+
+All five emotion ET features:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion_et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-fusion concat \
+  --features-used 1,1,1,1,1 \
+  --fp-dropout 0.1,0.3 \
+  --maxlen 200
+```
+
+FFD+TRT emotion gaze concat:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion_et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-fusion concat \
+  --features-used 0,1,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --maxlen 200
+```
+
+For TRT-only emotion gaze concat:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion_et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-fusion concat \
+  --features-used 0,0,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --maxlen 200
+```
+
+The hyphenated alias `emotion-et` is also accepted. For a pre-downloaded local
+copy, pass the local repo directory instead of the Hub id:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion-et \
+  --et-model-id ./hf_checks/emotion_et_model_snapshot \
+  --gaze-fusion concat \
+  --features-used 0,0,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --maxlen 200
+```
+
+Set `EMOTION_ET_LOCAL_FILES_ONLY=1` when you want the wrapper to fail fast
+instead of trying to download from Hugging Face.
+
+### MECO ET predictor + PCA/GMM gaze variants
+
+After training or downloading an `et-meco` checkpoint, point the VA runner to the
+local path or Hugging Face repo id:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type et-meco \
+  --et-model-id /Users/wansookim/Documents/meco_data/checkpoints/et_meco_xlmr_base \
+  --gaze-fusion concat \
+  --gaze-transform pca \
+  --gaze-artifact-dir /Users/wansookim/Documents/meco_data/checkpoints/et_meco_artifacts \
+  --pca-components 2
+```
+
+For GMM posterior concat:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type et-meco \
+  --et-model-id /Users/wansookim/Documents/meco_data/checkpoints/et_meco_xlmr_base \
+  --gaze-fusion concat \
+  --gaze-transform gmm \
+  --gaze-artifact-dir /Users/wansookim/Documents/meco_data/checkpoints/et_meco_artifacts \
+  --gmm-components 5
+```
+
+For the main GMM-adapter model:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type et-meco \
+  --et-model-id /Users/wansookim/Documents/meco_data/checkpoints/et_meco_xlmr_base \
+  --gaze-fusion gmm-adapter \
+  --gaze-artifact-dir /Users/wansookim/Documents/meco_data/checkpoints/et_meco_artifacts \
+  --gmm-components 5 \
+  --gaze-add-scale 0.05
+```
+
+`et-meco` predicts MECO-8 features:
+`firstfix.dur,firstrun.dur,dur,firstrun.nfix,nfix,skip,reg.in,reread`.
+PCA/GMM artifacts must be fit on the MECO ET train split, not on VA data.
 
 ### Out-of-fold overall metrics
 

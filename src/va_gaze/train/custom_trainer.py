@@ -65,7 +65,7 @@ def _robust_loss(adaptive, logits, labels):
 
 
 class CustomTrainerMSE(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
@@ -74,7 +74,7 @@ class CustomTrainerMSE(Trainer):
 
 
 class CustomTrainerCCC(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
@@ -83,7 +83,7 @@ class CustomTrainerCCC(Trainer):
 
 
 class CustomTrainerMSE_CCC(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
@@ -102,7 +102,7 @@ class CustomTrainerRobust(Trainer):
         optimizer = super().create_optimizer()
         return _attach_adaptive_params(optimizer, self.adaptive)
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
@@ -119,7 +119,7 @@ class CustomTrainerRobustCCC(Trainer):
         optimizer = super().create_optimizer()
         return _attach_adaptive_params(optimizer, self.adaptive)
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
