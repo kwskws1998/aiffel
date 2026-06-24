@@ -467,14 +467,16 @@ Examples:
 The emotion-specific ET predictor on Hugging Face can be used as a drop-in
 replacement for ET2. It predicts the same five features in
 `nFix,FFD,GPT,TRT,fixProp` order, so the existing `--features-used` flags still
-apply.
+apply. The default emotion ET Hub repo is `skboy/emotion_et_2nd_model`. If a
+repo snapshot contains the exported model inside a single subdirectory, the
+loader resolves that model directory automatically.
 
 All five emotion ET features:
 
 ```bash
 python train_model.py xlmroberta-base mse+ccc \
   --et-model-type emotion_et \
-  --et-model-id skboy/emotion_et_model \
+  --et-model-id skboy/emotion_et_2nd_model \
   --gaze-fusion concat \
   --features-used 1,1,1,1,1 \
   --fp-dropout 0.1,0.3 \
@@ -486,7 +488,7 @@ FFD+TRT emotion gaze concat:
 ```bash
 python train_model.py xlmroberta-base mse+ccc \
   --et-model-type emotion_et \
-  --et-model-id skboy/emotion_et_model \
+  --et-model-id skboy/emotion_et_2nd_model \
   --gaze-fusion concat \
   --features-used 0,1,0,1,0 \
   --fp-dropout 0.1,0.3 \
@@ -496,9 +498,9 @@ python train_model.py xlmroberta-base mse+ccc \
 For TRT-only emotion gaze concat:
 
 ```bash
-python train_model.py xlmroberta-base mse+ccc \
+python train_model.py distilbert mse \
   --et-model-type emotion_et \
-  --et-model-id skboy/emotion_et_model \
+  --et-model-id skboy/emotion_et_2nd_model \
   --gaze-fusion concat \
   --features-used 0,0,0,1,0 \
   --fp-dropout 0.1,0.3 \
@@ -520,6 +522,9 @@ python train_model.py xlmroberta-base mse+ccc \
 
 Set `EMOTION_ET_LOCAL_FILES_ONLY=1` when you want the wrapper to fail fast
 instead of trying to download from Hugging Face.
+Set `EMOTION_ET_MODEL_SUBDIR=<subdir>` only when one repo snapshot contains
+multiple exported emotion ET model directories and the loader cannot choose
+unambiguously.
 
 ### MECO ET predictor + PCA/GMM gaze variants
 
