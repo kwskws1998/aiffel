@@ -90,12 +90,38 @@ def _join_dataset_and_predictions(dataset_df, predictions_df, prediction_filenam
     )
 
 
+def _rename_prediction_columns(df):
+    rename_map = {
+        "Unnamed: 0": "index_pred",
+        "0": "valence_pred",
+        "1": "arousal_pred",
+        "2": "valence_logvar_pred",
+        "3": "arousal_logvar_pred",
+    }
+    return df.rename(columns=rename_map)
+
+
+def _prediction_output_columns(df):
+    cols = [
+        "index",
+        "text",
+        "dataset_of_origin",
+        "valence_true",
+        "arousal_true",
+        "valence_pred",
+        "arousal_pred",
+    ]
+    optional_cols = ["valence_logvar_pred", "arousal_logvar_pred"]
+    cols.extend([col for col in optional_cols if col in df.columns])
+    return cols
+
+
 # Code tested on script_sort_predictions_temp.ipynb
 def create_prediction_tables(path, data_dir="data"):
     df_preds_fold1 = pd.read_csv(path + '/predictions_fold1.csv')
     df_preds_fold2 = pd.read_csv(path + '/predictions_fold2.csv')
-    df_preds_fold1 = df_preds_fold1.rename(columns={'Unnamed: 0' : 'index_pred', '0' : 'valence_pred', '1' : 'arousal_pred'})
-    df_preds_fold2 = df_preds_fold2.rename(columns={'Unnamed: 0' : 'index_pred', '0' : 'valence_pred', '1' : 'arousal_pred'})
+    df_preds_fold1 = _rename_prediction_columns(df_preds_fold1)
+    df_preds_fold2 = _rename_prediction_columns(df_preds_fold2)
     
     # Import original dataset files to df
     df_dataset_fold1 = pd.read_csv(os.path.join(data_dir, 'full_dataset_fold1.csv'),sep='\t',
@@ -122,18 +148,14 @@ def create_prediction_tables(path, data_dir="data"):
         df_dataset_fold1, df_preds_fold1, "predictions_fold1.csv"
     )
     df_fold1_join = df_fold1_join.drop(columns=['index_pred']) # Drop extra index column
-    cols = df_fold1_join.columns.tolist() # Re-order columns
-    cols = ['index', 'text', 'dataset_of_origin', 'valence_true', 'arousal_true', 'valence_pred', 'arousal_pred']
-    df_fold1_join = df_fold1_join[cols]
+    df_fold1_join = df_fold1_join[_prediction_output_columns(df_fold1_join)]
 
     # Fold 2
     df_fold2_join = _join_dataset_and_predictions(
         df_dataset_fold2, df_preds_fold2, "predictions_fold2.csv"
     )
     df_fold2_join = df_fold2_join.drop(columns=['index_pred']) # Drop extra index column
-    cols = df_fold2_join.columns.tolist() # Re-order columns
-    cols = ['index', 'text', 'dataset_of_origin', 'valence_true', 'arousal_true', 'valence_pred', 'arousal_pred']
-    df_fold2_join = df_fold2_join[cols]
+    df_fold2_join = df_fold2_join[_prediction_output_columns(df_fold2_join)]
     
     df_join = pd.concat([df_fold1_join, df_fold2_join], axis=0)
 

@@ -3,6 +3,7 @@ from transformers import DataCollatorWithPadding, TrainingArguments
 
 from va_gaze.train.custom_trainer import (
     CustomTrainerCCC,
+    CustomTrainerHeteroscedastic,
     CustomTrainerMSE,
     CustomTrainerMSE_CCC,
     CustomTrainerRobust,
@@ -11,9 +12,12 @@ from va_gaze.train.custom_trainer import (
 from va_gaze.eval.metrics import compute_metrics
 from va_gaze.models.regression import (
     DistilBertForSequenceClassificationSig,
+    DistilBertForSequenceClassificationHeteroscedastic,
     GazeAddForSequenceRegression,
     GazeConcatForSequenceRegression,
     GazeGmmAdapterForSequenceRegression,
+    GazeSummaryForSequenceRegression,
+    XLMRobertaForSequenceClassificationHeteroscedastic,
     XLMRobertaForSequenceClassificationSig,
 )
 
@@ -24,6 +28,7 @@ LOSS_TO_TRAINER = {
     "robust": CustomTrainerRobust,
     "mse+ccc": CustomTrainerMSE_CCC,
     "robust+ccc": CustomTrainerRobustCCC,
+    "hetero": CustomTrainerHeteroscedastic,
 }
 
 
@@ -37,7 +42,7 @@ def _select_batch_size(model_name, params):
     raise ValueError(f"Unknown model name: {model_name}")
 
 
-def _build_model(model_name, checkpoint, tokenizer, gaze_config):
+def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
     gaze_fusion = gaze_config.get("gaze_fusion")
     if not gaze_fusion:
         if bool(gaze_config.get("use_gaze_concat", False)):
@@ -57,6 +62,7 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config):
         "gaze_artifact_dir": gaze_config.get("gaze_artifact_dir"),
         "pca_components": gaze_config.get("pca_components", 2),
         "gmm_components": gaze_config.get("gmm_components", 5),
+        "output_dim": output_dim,
     }
 
     if gaze_fusion == "concat":
@@ -81,10 +87,26 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config):
             train_gaze_add_scale=gaze_config.get("train_gaze_add_scale", False),
             **shared_gaze_kwargs,
         )
+    if gaze_fusion == "summary":
+        return GazeSummaryForSequenceRegression(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            **shared_gaze_kwargs,
+        )
 
     if model_name == "distilbert":
+        if output_dim > 2:
+            return DistilBertForSequenceClassificationHeteroscedastic.from_pretrained(
+                checkpoint,
+                num_labels=output_dim,
+            )
         return DistilBertForSequenceClassificationSig.from_pretrained(checkpoint, num_labels=2)
     if model_name in ("xlmroberta-base", "xlmroberta-large"):
+        if output_dim > 2:
+            return XLMRobertaForSequenceClassificationHeteroscedastic.from_pretrained(
+                checkpoint,
+                num_labels=output_dim,
+            )
         return XLMRobertaForSequenceClassificationSig.from_pretrained(checkpoint, num_labels=2)
     raise ValueError(f"Unknown model name: {model_name}")
 
@@ -117,10 +139,19 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
     )
 
 
-def _build_trainer(loss_name, model, training_args, train_data, val_data):
+def _build_trainer(loss_name, model, training_args, train_data, val_data, params):
     trainer_cls = LOSS_TO_TRAINER.get(loss_name)
     if trainer_cls is None:
         raise ValueError(f"Unknown loss name: {loss_name}")
+    trainer_kwargs = {}
+    if loss_name == "hetero":
+        trainer_kwargs.update(
+            {
+                "hetero_mse_weight": params.get("hetero_mse_weight", 0.1),
+                "hetero_logvar_min": params.get("hetero_logvar_min", -5.0),
+                "hetero_logvar_max": params.get("hetero_logvar_max", 3.0),
+            }
+        )
     return trainer_cls(
         model,
         training_args,
@@ -129,6 +160,7 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data):
         eval_dataset=val_data,
         tokenizer=train_data.tokenizer,
         compute_metrics=compute_metrics,
+        **trainer_kwargs,
     )
 
 
@@ -152,9 +184,16 @@ def run_fold(
     logging_dir = f"logs/logs{fold_id}"
     batch_size = _select_batch_size(model_name, params)
 
-    model = _build_model(model_name, checkpoint, train_data.tokenizer, gaze_config)
+    output_dim = 4 if loss_name == "hetero" else 2
+    model = _build_model(
+        model_name,
+        checkpoint,
+        train_data.tokenizer,
+        gaze_config,
+        output_dim=output_dim,
+    )
     training_args = _build_training_args(output_dir, logging_dir, batch_size, params)
-    trainer = _build_trainer(loss_name, model, training_args, train_data, val_data)
+    trainer = _build_trainer(loss_name, model, training_args, train_data, val_data, params)
 
     print(f"Starting fold {fold_id}")
     trainer.train()

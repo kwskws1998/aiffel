@@ -1,10 +1,11 @@
-import pandas as pd
-import numpy as np
-from torch.utils.data import Dataset
-from transformers import DistilBertTokenizer, XLMRobertaTokenizer
-import torch
 import csv
 import os
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+from transformers import AutoTokenizer, DistilBertTokenizer, XLMRobertaTokenizer
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -17,6 +18,8 @@ class MyDataset(Dataset):
             self.tokenizer = XLMRobertaTokenizer.from_pretrained(checkpoint)
         elif(checkpoint == 'xlm-roberta-base'): 
             self.tokenizer = XLMRobertaTokenizer.from_pretrained(checkpoint)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 
         df = pd.read_csv(filename,sep='\t',
                 quotechar='"',

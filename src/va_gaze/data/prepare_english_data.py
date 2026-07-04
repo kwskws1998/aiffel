@@ -9,6 +9,7 @@ import pandas as pd
 DEFAULT_GDRIVE_ZIP_URL = "https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing"
 DEFAULT_GDRIVE_ZIP_NAME = "english_va_bundle.zip"
 DEFAULT_EXTERNAL_DIR = "data/external_english"
+NORMALIZATION_CHOICES = ("observed", "source-scale")
 
 EXTERNAL_SOURCE_NAME_MAP = {
     "iemocap": "IEMOCAP sentences",
@@ -20,6 +21,11 @@ EXTERNAL_SOURCE_NAME_MAP = {
     "fb": "fb",
     "emobank": "Emobank",
     "anet": "ANET sentences",
+}
+
+SOURCE_SCALE_BOUNDS = {
+    "fb": {"valence": (1.0, 9.0), "arousal": (1.0, 9.0)},
+    "facebook_va": {"valence": (1.0, 9.0), "arousal": (1.0, 9.0)},
 }
 
 
@@ -43,7 +49,21 @@ def _normalize_minmax(series):
     return normalized.clip(0.0, 1.0)
 
 
-def _post_process_dataset(df):
+def _normalize_with_bounds(series, lower, upper):
+    series = pd.to_numeric(series, errors="coerce")
+    if upper <= lower:
+        raise ValueError("source-scale normalization requires upper > lower.")
+    return ((series - lower) / (upper - lower)).clip(0.0, 1.0)
+
+
+def _source_scale_bounds(dataset_name):
+    if dataset_name is None:
+        return None
+    normalized_name = str(dataset_name).lower().replace("-", "_")
+    return SOURCE_SCALE_BOUNDS.get(normalized_name)
+
+
+def _post_process_dataset(df, dataset_name=None, normalization="observed"):
     out = df.copy()
     out["text"] = _clean_text_column(out["text"])
     out["valence"] = pd.to_numeric(out["valence"], errors="coerce")
@@ -51,14 +71,21 @@ def _post_process_dataset(df):
     out = out.dropna(subset=["text", "valence", "arousal"])
     out = out[out["text"] != ""]
 
-    val_in_unit = out["valence"].between(0.0, 1.0, inclusive="both").all()
-    aro_in_unit = out["arousal"].between(0.0, 1.0, inclusive="both").all()
-    if val_in_unit and aro_in_unit:
-        out["valence"] = out["valence"].clip(0.0, 1.0)
-        out["arousal"] = out["arousal"].clip(0.0, 1.0)
+    source_bounds = _source_scale_bounds(dataset_name)
+    if normalization == "source-scale" and source_bounds is not None:
+        val_lower, val_upper = source_bounds["valence"]
+        aro_lower, aro_upper = source_bounds["arousal"]
+        out["valence"] = _normalize_with_bounds(out["valence"], val_lower, val_upper)
+        out["arousal"] = _normalize_with_bounds(out["arousal"], aro_lower, aro_upper)
     else:
-        out["valence"] = _normalize_minmax(out["valence"])
-        out["arousal"] = _normalize_minmax(out["arousal"])
+        val_in_unit = out["valence"].between(0.0, 1.0, inclusive="both").all()
+        aro_in_unit = out["arousal"].between(0.0, 1.0, inclusive="both").all()
+        if val_in_unit and aro_in_unit:
+            out["valence"] = out["valence"].clip(0.0, 1.0)
+            out["arousal"] = out["arousal"].clip(0.0, 1.0)
+        else:
+            out["valence"] = _normalize_minmax(out["valence"])
+            out["arousal"] = _normalize_minmax(out["arousal"])
 
     out = out.dropna(subset=["valence", "arousal"])
     out = out.drop_duplicates(subset=["text", "dataset_of_origin"])
@@ -128,7 +155,7 @@ def _infer_dataset_name_from_path(path):
     return EXTERNAL_SOURCE_NAME_MAP.get(stem, stem)
 
 
-def _load_external_sources(external_dir):
+def _load_external_sources(external_dir, normalization="observed"):
     os.makedirs(external_dir, exist_ok=True)
     files = sorted(
         file_name
@@ -163,7 +190,11 @@ def _load_external_sources(external_dir):
                 "dataset_of_origin": dataset_name,
             }
         )
-        out = _post_process_dataset(out)
+        out = _post_process_dataset(
+            out,
+            dataset_name=dataset_name,
+            normalization=normalization,
+        )
         if len(out) == 0:
             print(f"[warn] Skip {path}: no valid rows after processing.")
             continue
@@ -201,6 +232,7 @@ def build_english_dataset(
     gdrive_zip_url=DEFAULT_GDRIVE_ZIP_URL,
     gdrive_zip_name=DEFAULT_GDRIVE_ZIP_NAME,
     skip_gdrive_download=False,
+    normalization="observed",
 ):
     fold1_path = os.path.join(output_dir, "full_dataset_fold1.csv")
     fold2_path = os.path.join(output_dir, "full_dataset_fold2.csv")
@@ -223,7 +255,7 @@ def build_english_dataset(
     if os.path.isfile(zip_path):
         _extract_zip_tsv(zip_path, external_dir, force=force)
 
-    dataframes = _load_external_sources(external_dir)
+    dataframes = _load_external_sources(external_dir, normalization=normalization)
     if not dataframes:
         raise RuntimeError(
             "No valid dataset TSV files available. "
@@ -243,6 +275,7 @@ def build_english_dataset(
 
     counts = merged.groupby("dataset_of_origin").size().sort_values(ascending=False)
     print("English dataset prepared.")
+    print(f"Normalization: {normalization}")
     print(f"Total samples: {len(merged)}")
     print("Samples per source:")
     for name, value in counts.items():
@@ -291,6 +324,15 @@ def main():
         action="store_true",
         help="Skip gdown download and use already existing TSV files in --external-dir.",
     )
+    parser.add_argument(
+        "--normalization",
+        choices=NORMALIZATION_CHOICES,
+        default="observed",
+        help=(
+            "observed keeps the previous per-file observed min/max behavior. "
+            "source-scale uses known source bounds when available and falls back to observed otherwise."
+        ),
+    )
     args = parser.parse_args()
 
     build_english_dataset(
@@ -301,6 +343,7 @@ def main():
         gdrive_zip_url=args.gdrive_zip_url,
         gdrive_zip_name=args.gdrive_zip_name,
         skip_gdrive_download=args.skip_gdrive_download,
+        normalization=args.normalization,
     )
 
 

@@ -14,10 +14,10 @@ from va_gaze.train.fold2 import training_fold2
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 MODEL_CHOICES = ["distilbert", "xlmroberta-base", "xlmroberta-large"]
-LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc"]
+LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc", "hetero"]
 ET_MODEL_CHOICES = ["et2", "emotion-et", "emotion_et", "et-meco", "et_meco"]
 GAZE_TRANSFORM_CHOICES = ["raw", "pca", "gmm"]
-GAZE_FUSION_CHOICES = ["concat", "add", "gmm-adapter"]
+GAZE_FUSION_CHOICES = ["concat", "add", "gmm-adapter", "summary"]
 MODEL_TO_CHECKPOINT = {
     "distilbert": "distilbert-base-multilingual-cased",
     "xlmroberta-base": "xlm-roberta-base",
@@ -90,6 +90,9 @@ def _build_parser():
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--hetero-mse-weight", type=float, default=0.1)
+    parser.add_argument("--hetero-logvar-min", type=float, default=-5.0)
+    parser.add_argument("--hetero-logvar-max", type=float, default=3.0)
     parser.add_argument("--optim", type=str, default="adamw_torch")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -139,6 +142,12 @@ def _validate_args(parser, args):
 
     if args.gaze_add_scale < 0:
         parser.error("gaze_add_scale must be >= 0.")
+
+    if args.hetero_mse_weight < 0:
+        parser.error("hetero_mse_weight must be >= 0.")
+
+    if args.hetero_logvar_min >= args.hetero_logvar_max:
+        parser.error("hetero_logvar_min must be smaller than hetero_logvar_max.")
 
     if args.use_gaze_concat and args.use_gaze_add:
         parser.error("--use-gaze-concat and --use-gaze-add are mutually exclusive.")
@@ -247,6 +256,9 @@ def main():
         "max_steps": args.max_steps,
         "weight_decay": args.weight_decay,
         "warmup_ratio": args.warmup_ratio,
+        "hetero_mse_weight": args.hetero_mse_weight,
+        "hetero_logvar_min": args.hetero_logvar_min,
+        "hetero_logvar_max": args.hetero_logvar_max,
         "optim": args.optim,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "seed": args.seed,

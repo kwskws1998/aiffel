@@ -64,6 +64,24 @@ def _robust_loss(adaptive, logits, labels):
     return torch.mean(adaptive.lossfun(residual))
 
 
+def _split_heteroscedastic_logits(logits):
+    if logits.shape[-1] < 4:
+        raise ValueError(
+            "Heteroscedastic loss requires model logits with at least 4 columns: "
+            "valence_mu, arousal_mu, valence_logvar, arousal_logvar."
+        )
+    return logits[:, :2], logits[:, 2:4]
+
+
+def _heteroscedastic_loss(logits, labels, mse_weight=0.1, logvar_min=-5.0, logvar_max=3.0):
+    mu, logvar = _split_heteroscedastic_logits(logits)
+    logvar = torch.clamp(logvar, min=logvar_min, max=logvar_max)
+    squared_error = torch.square(labels - mu)
+    nll = 0.5 * torch.exp(-logvar) * squared_error + 0.5 * logvar
+    mse_anchor = torch.nn.functional.mse_loss(mu, labels)
+    return nll.mean() + float(mse_weight) * mse_anchor
+
+
 class CustomTrainerMSE(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
@@ -126,4 +144,32 @@ class CustomTrainerRobustCCC(Trainer):
         robust = _robust_loss(self.adaptive, logits, labels)
         ccc = _ccc_loss(logits, labels)
         loss = 0.5 * (robust + ccc)
+        return (loss, outputs) if return_outputs else loss
+
+
+class CustomTrainerHeteroscedastic(Trainer):
+    def __init__(
+        self,
+        *args,
+        hetero_mse_weight=0.1,
+        hetero_logvar_min=-5.0,
+        hetero_logvar_max=3.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.hetero_mse_weight = hetero_mse_weight
+        self.hetero_logvar_min = hetero_logvar_min
+        self.hetero_logvar_max = hetero_logvar_max
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels, model_inputs = _pop_labels(inputs)
+        outputs = model(**model_inputs)
+        logits = outputs.get("logits")
+        loss = _heteroscedastic_loss(
+            logits,
+            labels,
+            mse_weight=self.hetero_mse_weight,
+            logvar_min=self.hetero_logvar_min,
+            logvar_max=self.hetero_logvar_max,
+        )
         return (loss, outputs) if return_outputs else loss

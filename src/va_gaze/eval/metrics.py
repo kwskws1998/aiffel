@@ -4,7 +4,8 @@ from scipy import stats
 
 def compute_metrics(eval_pred):
     predictions, labels = eval_pred
-    np_preds = np.array(predictions)
+    np_preds_full = np.array(predictions)
+    np_preds = np_preds_full[:, :2]
     np_labels = np.array(labels)
 
     mse_valence = mean_squared_error(np_labels[:,0], np_preds[:,0])
@@ -24,11 +25,15 @@ def compute_metrics(eval_pred):
             "pearson_corr_arousal : " + str(pearson_corr_arousal))
     print('\n \n')
 
-    return {
+    metrics = {
         "mse_valence" : mse_valence, 
         "mae_valence" : mae_valence,
         "pearson_corr_valence": pearson_corr_valence,
         "mse_arousal" : mse_arousal, 
         "mae_arousal" : mae_arousal,
         "pearson_corr_arousal": pearson_corr_arousal
-        }
+    }
+    if np_preds_full.shape[1] >= 4:
+        metrics["mean_logvar_valence"] = float(np.mean(np_preds_full[:, 2]))
+        metrics["mean_logvar_arousal"] = float(np.mean(np_preds_full[:, 3]))
+    return metrics
