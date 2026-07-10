@@ -13,6 +13,15 @@ def _pop_labels(inputs):
     return labels, model_inputs
 
 
+def _add_model_auxiliary_loss(task_loss, outputs):
+    auxiliary_loss = outputs.get("loss")
+    if auxiliary_loss is None:
+        return task_loss
+    if auxiliary_loss.ndim > 0:
+        auxiliary_loss = auxiliary_loss.mean()
+    return task_loss + auxiliary_loss
+
+
 def _ccc_loss(logits, labels):
     logits_v = logits[:, 0]
     logits_a = logits[:, 1]
@@ -73,6 +82,18 @@ def _split_heteroscedastic_logits(logits):
     return logits[:, :2], logits[:, 2:4]
 
 
+class VARegressionTrainer(Trainer):
+    """Shared trainer base that keeps custom gaze models reloadable at every save."""
+
+    def _save(self, output_dir=None, state_dict=None):
+        super()._save(output_dir=output_dir, state_dict=state_dict)
+        target_dir = output_dir or self.args.output_dir
+        model = self.accelerator.unwrap_model(self.model)
+        save_manifest = getattr(model, "save_architecture_manifest", None)
+        if callable(save_manifest):
+            save_manifest(target_dir)
+
+
 def _heteroscedastic_loss(logits, labels, mse_weight=0.1, logvar_min=-5.0, logvar_max=3.0):
     mu, logvar = _split_heteroscedastic_logits(logits)
     logvar = torch.clamp(logvar, min=logvar_min, max=logvar_max)
@@ -82,25 +103,27 @@ def _heteroscedastic_loss(logits, labels, mse_weight=0.1, logvar_min=-5.0, logva
     return nll.mean() + float(mse_weight) * mse_anchor
 
 
-class CustomTrainerMSE(Trainer):
+class CustomTrainerMSE(VARegressionTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
         loss = torch.nn.functional.mse_loss(logits.view(-1), labels.view(-1))
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss
 
 
-class CustomTrainerCCC(Trainer):
+class CustomTrainerCCC(VARegressionTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
         loss = _ccc_loss(logits, labels)
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss
 
 
-class CustomTrainerMSE_CCC(Trainer):
+class CustomTrainerMSE_CCC(VARegressionTrainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels, model_inputs = _pop_labels(inputs)
         outputs = model(**model_inputs)
@@ -108,10 +131,11 @@ class CustomTrainerMSE_CCC(Trainer):
         mse_loss = torch.nn.functional.mse_loss(logits.view(-1), labels.view(-1))
         ccc_loss = _ccc_loss(logits, labels)
         loss = 0.5 * (mse_loss + ccc_loss)
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss
 
 
-class CustomTrainerRobust(Trainer):
+class CustomTrainerRobust(VARegressionTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.adaptive = _build_adaptive_loss(num_dims=2)
@@ -125,10 +149,11 @@ class CustomTrainerRobust(Trainer):
         outputs = model(**model_inputs)
         logits = outputs.get("logits")
         loss = _robust_loss(self.adaptive, logits, labels)
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss
 
 
-class CustomTrainerRobustCCC(Trainer):
+class CustomTrainerRobustCCC(VARegressionTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.adaptive = _build_adaptive_loss(num_dims=2)
@@ -144,10 +169,11 @@ class CustomTrainerRobustCCC(Trainer):
         robust = _robust_loss(self.adaptive, logits, labels)
         ccc = _ccc_loss(logits, labels)
         loss = 0.5 * (robust + ccc)
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss
 
 
-class CustomTrainerHeteroscedastic(Trainer):
+class CustomTrainerHeteroscedastic(VARegressionTrainer):
     def __init__(
         self,
         *args,
@@ -172,4 +198,5 @@ class CustomTrainerHeteroscedastic(Trainer):
             logvar_min=self.hetero_logvar_min,
             logvar_max=self.hetero_logvar_max,
         )
+        loss = _add_model_auxiliary_loss(loss, outputs)
         return (loss, outputs) if return_outputs else loss

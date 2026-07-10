@@ -1,15 +1,34 @@
 import argparse
 import csv
+import hashlib
+import json
 import os
+from pathlib import Path, PurePosixPath
+import shutil
+import tempfile
+import unicodedata
+import uuid
 import zipfile
 
 import pandas as pd
 
+from va_gaze.data.downloads import (
+    GDriveArtifact,
+    download_gdrive_artifact,
+    sha256_file,
+    validate_zip_artifact,
+)
 
-DEFAULT_GDRIVE_ZIP_URL = "https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing"
+
+DEFAULT_GDRIVE_ZIP_URL = None
 DEFAULT_GDRIVE_ZIP_NAME = "english_va_bundle.zip"
 DEFAULT_EXTERNAL_DIR = "data/external_english"
 NORMALIZATION_CHOICES = ("observed", "source-scale")
+EXTRACTION_MANIFEST_NAME = ".va_gaze_extraction.json"
+EXTRACTION_ROOT_NAME = ".va_gaze_extracted"
+BUILD_MANIFEST_NAME = "english_dataset_manifest.json"
+EXTRACTION_MANIFEST_VERSION = 1
+BUILD_MANIFEST_VERSION = 1
 
 EXTERNAL_SOURCE_NAME_MAP = {
     "iemocap": "IEMOCAP sentences",
@@ -92,61 +111,207 @@ def _post_process_dataset(df, dataset_name=None, normalization="observed"):
     return out
 
 
-def _download_gdrive_zip(gdrive_url, zip_path, force=False):
-    if os.path.isfile(zip_path) and not force:
-        print(f"[zip] Already exists, skip download: {zip_path}")
-        return zip_path
+def _download_gdrive_zip(
+    gdrive_url,
+    zip_path,
+    force=False,
+    file_id=None,
+    sha256=None,
+    offline=False,
+    downloader=None,
+):
+    artifact = GDriveArtifact(
+        filename=os.path.basename(zip_path),
+        file_id=file_id,
+        url=gdrive_url,
+        sha256=sha256,
+    )
+    return str(
+        download_gdrive_artifact(
+            artifact=artifact,
+            destination_dir=os.path.dirname(zip_path) or ".",
+            force=force,
+            offline=offline,
+            downloader=downloader,
+        )
+    )
 
-    try:
-        import gdown
-    except ImportError as exc:
-        raise ImportError(
-            "gdown is required to download the dataset zip from Google Drive. "
-            "Install it with: pip install gdown"
-        ) from exc
 
-    os.makedirs(os.path.dirname(zip_path) or ".", exist_ok=True)
-    print(f"[zip] Downloading from Google Drive -> {zip_path}")
+def _read_json(path):
+    with open(path, "r", encoding="utf-8") as input_file:
+        return json.load(input_file)
+
+
+def _write_json_atomic(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        downloaded = gdown.download(gdrive_url, zip_path, quiet=False, fuzzy=True)
-    except TypeError:
-        # gdown>=6 removed/changed this parameter; plain URL download still works.
-        downloaded = gdown.download(gdrive_url, zip_path, quiet=False)
-    if not downloaded or not os.path.isfile(zip_path):
-        raise RuntimeError("Failed to download Google Drive dataset zip.")
-    return zip_path
+        with open(temporary, "x", encoding="utf-8") as output_file:
+            json.dump(payload, output_file, indent=2, sort_keys=True)
+            output_file.write("\n")
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _manifest_basename_key(name):
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _active_extracted_paths(external_dir, expected_archive_sha256=None):
+    external_dir = Path(external_dir)
+    manifest_path = external_dir / EXTRACTION_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return None
+    manifest = _read_json(manifest_path)
+    if manifest.get("schema_version") != EXTRACTION_MANIFEST_VERSION:
+        raise ValueError(f"Unsupported extraction manifest: {manifest_path}")
+    if (
+        expected_archive_sha256 is not None
+        and manifest.get("archive_sha256") != expected_archive_sha256
+    ):
+        return None
+
+    version = manifest.get("version")
+    if not isinstance(version, str) or Path(version).name != version:
+        raise ValueError(f"Unsafe extraction version in manifest: {manifest_path}")
+    data_dir = external_dir / EXTRACTION_ROOT_NAME / version
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(f"Extraction manifest has no files: {manifest_path}")
+
+    paths = []
+    destination_names = set()
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if (
+            not isinstance(name, str)
+            or PurePosixPath(name).name != name
+            or not name.casefold().endswith(".tsv")
+        ):
+            raise ValueError(f"Unsafe extracted filename in manifest: {manifest_path}")
+        destination_key = _manifest_basename_key(name)
+        if destination_key in destination_names:
+            raise ValueError(f"Duplicate extracted filename in manifest: {name}")
+        destination_names.add(destination_key)
+        path = data_dir / name
+        if not path.is_file():
+            raise ValueError(f"Extracted TSV is missing: {path}")
+        if path.stat().st_size != entry.get("size_bytes"):
+            raise ValueError(f"Extracted TSV size mismatch: {path}")
+        if sha256_file(path) != entry.get("sha256"):
+            raise ValueError(f"Extracted TSV hash mismatch: {path}")
+        paths.append(path)
+    return paths
+
+
+def _stream_zip_member(archive, member, destination, max_bytes):
+    digest = hashlib.sha256()
+    total = 0
+    with archive.open(member, "r") as source, open(destination, "xb") as output_file:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes or total > member.file_size:
+                raise ValueError(f"Zip member exceeded its validated size: {member.filename}")
+            output_file.write(chunk)
+            digest.update(chunk)
+        output_file.flush()
+        os.fsync(output_file.fileno())
+    if total != member.file_size:
+        raise ValueError(
+            f"Zip member size changed during extraction: {member.filename} "
+            f"({total} != {member.file_size})"
+        )
+    return {
+        "name": destination.name,
+        "sha256": digest.hexdigest(),
+        "size_bytes": total,
+    }
+
+
+def _cleanup_inactive_extractions(managed_root, active_version):
+    for candidate in managed_root.iterdir():
+        if candidate.name == active_version:
+            continue
+        if candidate.is_dir():
+            shutil.rmtree(candidate, ignore_errors=True)
 
 
 def _extract_zip_tsv(zip_path, external_dir, force=False):
-    if not os.path.isfile(zip_path):
+    zip_path = Path(zip_path)
+    external_dir = Path(external_dir)
+    if not zip_path.is_file():
         raise FileNotFoundError(f"Zip file not found: {zip_path}")
 
-    os.makedirs(external_dir, exist_ok=True)
-    extracted = []
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        for member in archive.infolist():
-            name = member.filename
-            base = os.path.basename(name)
-            if member.is_dir():
-                continue
-            if not base.lower().endswith(".tsv"):
-                continue
-            if name.startswith("__MACOSX/") or base.startswith("._"):
-                continue
+    external_dir.mkdir(parents=True, exist_ok=True)
+    artifact = GDriveArtifact(filename=zip_path.name)
+    valid_members = set(validate_zip_artifact(zip_path, artifact))
+    archive_sha256 = sha256_file(zip_path)
 
-            out_path = os.path.join(external_dir, base)
-            if os.path.isfile(out_path) and not force:
-                extracted.append(out_path)
-                continue
+    if not force:
+        try:
+            cached_paths = _active_extracted_paths(
+                external_dir,
+                expected_archive_sha256=archive_sha256,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"[zip] Extracted cache is invalid; rebuilding: {exc}")
+        else:
+            if cached_paths:
+                print(f"[zip] Valid extracted cache: {len(cached_paths)} TSV files")
+                return [str(path) for path in cached_paths]
 
-            with archive.open(member) as src, open(out_path, "wb") as dst:
-                dst.write(src.read())
-            extracted.append(out_path)
+    managed_root = external_dir / EXTRACTION_ROOT_NAME
+    managed_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=".staging-", dir=str(managed_root))
+    )
+    version = f"{archive_sha256[:16]}-{uuid.uuid4().hex}"
+    version_dir = managed_root / version
+    activated = False
+    entries = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            for member in archive.infolist():
+                if member.filename not in valid_members:
+                    continue
+                base_name = PurePosixPath(member.filename).name
+                destination = staging_dir / base_name
+                entries.append(
+                    _stream_zip_member(
+                        archive,
+                        member,
+                        destination,
+                        max_bytes=artifact.max_member_bytes,
+                    )
+                )
+        entries.sort(key=lambda entry: _manifest_basename_key(entry["name"]))
+        os.replace(staging_dir, version_dir)
+        manifest = {
+            "schema_version": EXTRACTION_MANIFEST_VERSION,
+            "archive_filename": zip_path.name,
+            "archive_sha256": archive_sha256,
+            "version": version,
+            "files": entries,
+        }
+        _write_json_atomic(external_dir / EXTRACTION_MANIFEST_NAME, manifest)
+        activated = True
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if not activated and version_dir.exists():
+            shutil.rmtree(version_dir, ignore_errors=True)
 
-    if extracted:
-        print(f"[zip] TSV files ready in {external_dir}: {len(extracted)}")
-    else:
-        print(f"[zip] No TSV files extracted from: {zip_path}")
+    _cleanup_inactive_extractions(managed_root, version)
+    extracted = [str(version_dir / entry["name"]) for entry in entries]
+    print(f"[zip] Atomically activated {len(extracted)} TSV files in {version_dir}")
     return extracted
 
 
@@ -155,21 +320,61 @@ def _infer_dataset_name_from_path(path):
     return EXTERNAL_SOURCE_NAME_MAP.get(stem, stem)
 
 
-def _load_external_sources(external_dir, normalization="observed"):
-    os.makedirs(external_dir, exist_ok=True)
-    files = sorted(
-        file_name
-        for file_name in os.listdir(external_dir)
-        if file_name.lower().endswith(".tsv")
+def _external_source_paths(external_dir):
+    external_dir = Path(external_dir)
+    external_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = external_dir / EXTRACTION_MANIFEST_NAME
+    if manifest_path.is_file():
+        paths = _active_extracted_paths(external_dir)
+        if not paths:
+            raise RuntimeError(f"Extraction manifest has no active TSV files: {manifest_path}")
+        return sorted(paths, key=lambda path: _manifest_basename_key(path.name))
+    return sorted(
+        (
+            path
+            for path in external_dir.iterdir()
+            if path.is_file() and path.name.casefold().endswith(".tsv")
+        ),
+        key=lambda path: _manifest_basename_key(path.name),
     )
 
-    if not files:
+
+def _source_fingerprint(paths):
+    records = []
+    destination_names = set()
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: _manifest_basename_key(Path(item).name)):
+        path = Path(path)
+        destination_key = _manifest_basename_key(path.name)
+        if destination_key in destination_names:
+            raise ValueError(f"Duplicate TSV source basename: {path.name}")
+        destination_names.add(destination_key)
+        file_sha256 = sha256_file(path)
+        record = {
+            "name": path.name,
+            "sha256": file_sha256,
+            "size_bytes": path.stat().st_size,
+        }
+        records.append(record)
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_sha256.encode("ascii"))
+        digest.update(b"\n")
+    return {"source_hash": digest.hexdigest(), "source_files": records}
+
+
+def _load_external_sources(external_dir, normalization="observed", source_paths=None):
+    if source_paths is None:
+        source_paths = _external_source_paths(external_dir)
+
+    if not source_paths:
         print(f"[external] No TSV files found in: {external_dir}")
         return []
 
     loaded = []
-    for file_name in files:
-        path = os.path.join(external_dir, file_name)
+    for path in source_paths:
+        path = Path(path)
+        file_name = path.name
         try:
             df = pd.read_csv(path, sep="\t")
         except Exception as exc:
@@ -224,6 +429,66 @@ def _write_tsv(df, path):
     )
 
 
+def _dataset_cache_is_valid(output_paths, manifest_path, build_config):
+    manifest_path = Path(manifest_path)
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = _read_json(manifest_path)
+        if manifest.get("schema_version") != BUILD_MANIFEST_VERSION:
+            return False
+        if manifest.get("build") != build_config:
+            return False
+        output_metadata = manifest.get("outputs") or {}
+        for output_path in output_paths:
+            output_path = Path(output_path)
+            metadata = output_metadata.get(output_path.name)
+            if not output_path.is_file() or not isinstance(metadata, dict):
+                return False
+            if output_path.stat().st_size != metadata.get("size_bytes"):
+                return False
+            if sha256_file(output_path) != metadata.get("sha256"):
+                return False
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
+def _write_dataset_outputs_atomically(outputs, manifest_path, build_config):
+    temporary_paths = {}
+    output_metadata = {}
+    try:
+        for output_path, dataframe in outputs.items():
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output_path.with_name(
+                f".{output_path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            temporary_paths[output_path] = temporary
+            _write_tsv(dataframe, temporary)
+            with open(temporary, "rb+") as output_file:
+                os.fsync(output_file.fileno())
+            output_metadata[output_path.name] = {
+                "rows": int(len(dataframe)),
+                "sha256": sha256_file(temporary),
+                "size_bytes": temporary.stat().st_size,
+            }
+
+        for output_path, temporary in temporary_paths.items():
+            os.replace(temporary, output_path)
+
+        manifest = {
+            "schema_version": BUILD_MANIFEST_VERSION,
+            "build": build_config,
+            "outputs": output_metadata,
+        }
+        _write_json_atomic(manifest_path, manifest)
+    finally:
+        for temporary in temporary_paths.values():
+            if temporary.exists():
+                temporary.unlink()
+
+
 def build_english_dataset(
     output_dir,
     seed,
@@ -231,35 +496,79 @@ def build_english_dataset(
     external_dir=DEFAULT_EXTERNAL_DIR,
     gdrive_zip_url=DEFAULT_GDRIVE_ZIP_URL,
     gdrive_zip_name=DEFAULT_GDRIVE_ZIP_NAME,
+    gdrive_file_id=None,
+    gdrive_sha256=None,
     skip_gdrive_download=False,
+    offline=False,
     normalization="observed",
 ):
-    fold1_path = os.path.join(output_dir, "full_dataset_fold1.csv")
-    fold2_path = os.path.join(output_dir, "full_dataset_fold2.csv")
-    merged_path = os.path.join(output_dir, "full_dataset_english_all.csv")
+    if normalization not in NORMALIZATION_CHOICES:
+        raise ValueError(
+            f"normalization must be one of {NORMALIZATION_CHOICES}, got {normalization!r}."
+        )
 
-    if (
-        not force
-        and os.path.isfile(fold1_path)
-        and os.path.isfile(fold2_path)
-        and os.path.isfile(merged_path)
-    ):
-        print("English dataset already exists. Skipping download/build.")
-        print(f"Use --force to rebuild: {fold1_path}, {fold2_path}")
-        return
+    output_dir = Path(output_dir)
+    external_dir = Path(external_dir)
+    if Path(gdrive_zip_name).name != gdrive_zip_name:
+        raise ValueError("gdrive_zip_name must be a basename, not a path.")
+    fold1_path = output_dir / "full_dataset_fold1.csv"
+    fold2_path = output_dir / "full_dataset_fold2.csv"
+    merged_path = output_dir / "full_dataset_english_all.csv"
+    manifest_path = output_dir / BUILD_MANIFEST_NAME
 
-    os.makedirs(external_dir, exist_ok=True)
-    zip_path = os.path.join(external_dir, gdrive_zip_name)
-    if not skip_gdrive_download:
-        _download_gdrive_zip(gdrive_zip_url, zip_path, force=force)
-    if os.path.isfile(zip_path):
+    external_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = external_dir / gdrive_zip_name
+    has_source = bool(gdrive_file_id or gdrive_zip_url)
+    if skip_gdrive_download:
+        if zip_path.is_file():
+            _extract_zip_tsv(zip_path, external_dir, force=force)
+    else:
+        if not has_source and not offline:
+            raise ValueError(
+                "No dataset download source is configured. Pass --gdrive-file-id or "
+                "--gdrive-zip-url, or use --skip-gdrive-download with local TSV files."
+            )
+        _download_gdrive_zip(
+            gdrive_zip_url,
+            zip_path,
+            force=force and not offline,
+            file_id=gdrive_file_id,
+            sha256=gdrive_sha256,
+            offline=offline,
+        )
         _extract_zip_tsv(zip_path, external_dir, force=force)
 
-    dataframes = _load_external_sources(external_dir, normalization=normalization)
+    source_paths = _external_source_paths(external_dir)
+    if not source_paths:
+        raise RuntimeError(
+            "No valid dataset TSV files available. Put TSV files in "
+            f"{external_dir} or pass --gdrive-file-id/--gdrive-zip-url."
+        )
+    source_fingerprint = _source_fingerprint(source_paths)
+    build_config = {
+        "seed": int(seed),
+        "normalization": normalization,
+        **source_fingerprint,
+    }
+    output_paths = (fold1_path, fold2_path, merged_path)
+    if not force and _dataset_cache_is_valid(
+        output_paths,
+        manifest_path,
+        build_config,
+    ):
+        print("English dataset cache matches its sources and build configuration.")
+        print(f"Skipping rebuild: {fold1_path}, {fold2_path}")
+        return
+
+    dataframes = _load_external_sources(
+        external_dir,
+        normalization=normalization,
+        source_paths=source_paths,
+    )
     if not dataframes:
         raise RuntimeError(
             "No valid dataset TSV files available. "
-            f"Put TSV files in {external_dir} or provide a valid --gdrive-zip-url."
+            f"Put TSV files in {external_dir} or pass a valid Google Drive source."
         )
 
     merged = pd.concat(dataframes, ignore_index=True)
@@ -267,11 +576,14 @@ def build_english_dataset(
     merged = merged.drop_duplicates(subset=["text", "dataset_of_origin"])
 
     fold1, fold2 = _split_in_two_folds(merged, seed=seed)
+    merged_output = pd.concat([fold1, fold2], ignore_index=True)
 
-    os.makedirs(output_dir, exist_ok=True)
-    _write_tsv(fold1, fold1_path)
-    _write_tsv(fold2, fold2_path)
-    _write_tsv(pd.concat([fold1, fold2], ignore_index=True), merged_path)
+    outputs = {
+        fold1_path: fold1,
+        fold2_path: fold2,
+        merged_path: merged_output,
+    }
+    _write_dataset_outputs_atomically(outputs, manifest_path, build_config)
 
     counts = merged.groupby("dataset_of_origin").size().sort_values(ascending=False)
     print("English dataset prepared.")
@@ -282,6 +594,7 @@ def build_english_dataset(
         print(f"- {name}: {value}")
     print(f"Saved: {fold1_path}")
     print(f"Saved: {fold2_path}")
+    print(f"Build manifest: {manifest_path}")
 
 
 def main():
@@ -312,7 +625,7 @@ def main():
     parser.add_argument(
         "--gdrive-zip-url",
         default=DEFAULT_GDRIVE_ZIP_URL,
-        help="Google Drive share URL for the dataset zip.",
+        help="Explicit Google Drive share URL for a dataset zip you may access.",
     )
     parser.add_argument(
         "--gdrive-zip-name",
@@ -320,9 +633,24 @@ def main():
         help="Filename to store downloaded zip under --external-dir.",
     )
     parser.add_argument(
+        "--gdrive-file-id",
+        default=None,
+        help="Explicit Google Drive file id; alternatively pass --gdrive-zip-url.",
+    )
+    parser.add_argument(
+        "--gdrive-sha256",
+        default=None,
+        help="Optional expected SHA256 for the downloaded zip.",
+    )
+    parser.add_argument(
         "--skip-gdrive-download",
         action="store_true",
         help="Skip gdown download and use already existing TSV files in --external-dir.",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Require a valid cached gdown archive and never access the network.",
     )
     parser.add_argument(
         "--normalization",
@@ -342,7 +670,10 @@ def main():
         external_dir=args.external_dir,
         gdrive_zip_url=args.gdrive_zip_url,
         gdrive_zip_name=args.gdrive_zip_name,
+        gdrive_file_id=args.gdrive_file_id,
+        gdrive_sha256=args.gdrive_sha256,
         skip_gdrive_download=args.skip_gdrive_download,
+        offline=args.offline,
         normalization=args.normalization,
     )
 

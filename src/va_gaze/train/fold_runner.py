@@ -1,5 +1,9 @@
+import inspect
+
+import numpy as np
 import pandas as pd
-from transformers import DataCollatorWithPadding, TrainingArguments
+import torch
+from transformers import DataCollatorWithPadding, Trainer, TrainingArguments, set_seed
 
 from va_gaze.train.custom_trainer import (
     CustomTrainerCCC,
@@ -10,6 +14,11 @@ from va_gaze.train.custom_trainer import (
     CustomTrainerRobustCCC,
 )
 from va_gaze.eval.metrics import compute_metrics
+from va_gaze.models.advanced_regression import (
+    CANONICAL_ADVANCED_GAZE_FUSIONS,
+    GazeFusionForSequenceRegression,
+    normalize_advanced_fusion,
+)
 from va_gaze.models.regression import (
     DistilBertForSequenceClassificationSig,
     DistilBertForSequenceClassificationHeteroscedastic,
@@ -30,6 +39,8 @@ LOSS_TO_TRAINER = {
     "robust+ccc": CustomTrainerRobustCCC,
     "hetero": CustomTrainerHeteroscedastic,
 }
+
+LEGACY_GAZE_FUSIONS = {"concat", "add", "gmm-adapter", "summary"}
 
 
 def _select_batch_size(model_name, params):
@@ -64,6 +75,63 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
         "gmm_components": gaze_config.get("gmm_components", 5),
         "output_dim": output_dim,
     }
+
+    gaze_aux_weight = float(gaze_config.get("gaze_aux_weight", 0.0))
+    gaze_alignment_weight = float(gaze_config.get("gaze_alignment_weight", 0.0))
+    has_training_objective = gaze_aux_weight > 0 or gaze_alignment_weight > 0
+    normalized_advanced_fusion = normalize_advanced_fusion(gaze_fusion)
+    if (
+        gaze_fusion != "none"
+        and gaze_fusion not in LEGACY_GAZE_FUSIONS
+        and normalized_advanced_fusion not in CANONICAL_ADVANCED_GAZE_FUSIONS
+    ):
+        raise ValueError(f"Unknown gaze fusion strategy: {gaze_fusion}")
+    if gaze_fusion in LEGACY_GAZE_FUSIONS and has_training_objective:
+        raise ValueError(
+            "Training-only gaze objectives cannot be combined with legacy "
+            "concat/add/summary/gmm-adapter fusion."
+        )
+    if (
+        gaze_fusion in LEGACY_GAZE_FUSIONS
+        and shared_gaze_kwargs["et_model_type"] in ("heuristic", "smoke")
+    ):
+        raise ValueError(
+            "The heuristic ET backend is smoke-only and unsupported by legacy gaze fusion."
+        )
+
+    if (
+        normalized_advanced_fusion in CANONICAL_ADVANCED_GAZE_FUSIONS
+        or has_training_objective
+    ):
+        fusion_strategy = (
+            normalized_advanced_fusion
+            if normalized_advanced_fusion in CANONICAL_ADVANCED_GAZE_FUSIONS
+            else "none"
+        )
+        return GazeFusionForSequenceRegression(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            fusion_strategy=fusion_strategy,
+            gaze_aux_weight=gaze_aux_weight,
+            gaze_alignment_weight=gaze_alignment_weight,
+            gaze_hidden_size=gaze_config.get("gaze_hidden_size", 128),
+            gaze_num_heads=gaze_config.get("gaze_num_heads", 4),
+            gaze_num_layers=gaze_config.get("gaze_num_layers", 1),
+            gaze_gate_init=gaze_config.get("gaze_gate_init", -4.0),
+            gaze_fusion_dropout=gaze_config.get("gaze_fusion_dropout", 0.1),
+            gaze_attention_scale=gaze_config.get("gaze_attention_scale", 0.1),
+            train_gaze_attention_scale=gaze_config.get(
+                "train_gaze_attention_scale", True
+            ),
+            gaze_alignment_dim=gaze_config.get("gaze_alignment_dim", 128),
+            gaze_alignment_temperature=gaze_config.get(
+                "gaze_alignment_temperature", 0.07
+            ),
+            gaze_alignment_max_tokens=gaze_config.get(
+                "gaze_alignment_max_tokens", 512
+            ),
+            **shared_gaze_kwargs,
+        )
 
     if gaze_fusion == "concat":
         return GazeConcatForSequenceRegression(
@@ -117,26 +185,32 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
     if save_strategy == "no":
         load_best_model_at_end = False
 
-    return TrainingArguments(
-        output_dir=output_dir,
-        logging_dir=logging_dir,
-        logging_steps=200,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        num_train_epochs=params["train_epochs"],
-        max_steps=params.get("max_steps", -1),
-        learning_rate=params["lr"],
-        weight_decay=params["weight_decay"],
-        optim=params.get("optim", "adamw_torch"),
-        gradient_accumulation_steps=params.get("gradient_accumulation_steps", 1),
-        seed=params.get("seed", 42),
-        group_by_length=True,
-        evaluation_strategy="epoch",
-        save_strategy=save_strategy,
-        save_total_limit=params.get("save_total_limit", 1),
-        load_best_model_at_end=load_best_model_at_end,
-        warmup_ratio=params["warmup_ratio"],
-    )
+    training_kwargs = {
+        "output_dir": output_dir,
+        "logging_dir": logging_dir,
+        "logging_steps": 200,
+        "per_device_train_batch_size": batch_size,
+        "per_device_eval_batch_size": batch_size,
+        "num_train_epochs": params["train_epochs"],
+        "max_steps": params.get("max_steps", -1),
+        "learning_rate": params["lr"],
+        "weight_decay": params["weight_decay"],
+        "optim": params.get("optim", "adamw_torch"),
+        "gradient_accumulation_steps": params.get("gradient_accumulation_steps", 1),
+        "seed": params.get("seed", 42),
+        "group_by_length": True,
+        "save_strategy": save_strategy,
+        "save_total_limit": params.get("save_total_limit", 1),
+        "load_best_model_at_end": load_best_model_at_end,
+        "warmup_ratio": params["warmup_ratio"],
+        "dataloader_pin_memory": torch.cuda.is_available(),
+    }
+    if params.get("report_to") is not None:
+        training_kwargs["report_to"] = params["report_to"]
+    argument_names = inspect.signature(TrainingArguments.__init__).parameters
+    strategy_name = "eval_strategy" if "eval_strategy" in argument_names else "evaluation_strategy"
+    training_kwargs[strategy_name] = "epoch"
+    return TrainingArguments(**training_kwargs)
 
 
 def _build_trainer(loss_name, model, training_args, train_data, val_data, params):
@@ -152,16 +226,45 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data, params
                 "hetero_logvar_max": params.get("hetero_logvar_max", 3.0),
             }
         )
+    trainer_kwargs.update(
+        {
+            "data_collator": DataCollatorWithPadding(train_data.tokenizer),
+            "train_dataset": train_data,
+            "eval_dataset": val_data,
+            "compute_metrics": compute_metrics,
+        }
+    )
+    trainer_argument_names = inspect.signature(Trainer.__init__).parameters
+    if "processing_class" in trainer_argument_names:
+        trainer_kwargs["processing_class"] = train_data.tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = train_data.tokenizer
     return trainer_cls(
-        model,
-        training_args,
-        data_collator=DataCollatorWithPadding(train_data.tokenizer),
-        train_dataset=train_data,
-        eval_dataset=val_data,
-        tokenizer=train_data.tokenizer,
-        compute_metrics=compute_metrics,
+        model=model,
+        args=training_args,
         **trainer_kwargs,
     )
+
+
+def _validate_prediction_array(predictions, output_dim):
+    if not isinstance(predictions, np.ndarray):
+        raise TypeError(
+            "Trainer predictions must be a single numpy.ndarray; hidden states or "
+            "attentions may have leaked into the prediction output."
+        )
+    if predictions.ndim != 2:
+        raise ValueError(
+            f"Trainer predictions must be 2D, got shape {predictions.shape}."
+        )
+    if predictions.shape[1] != int(output_dim):
+        raise ValueError(
+            f"Trainer predictions must have {output_dim} columns, got {predictions.shape[1]}."
+        )
+    if not np.issubdtype(predictions.dtype, np.number):
+        raise TypeError(f"Trainer predictions must be numeric, got dtype {predictions.dtype}.")
+    if not np.isfinite(predictions).all():
+        raise ValueError("Trainer predictions contain NaN or infinite values.")
+    return predictions
 
 
 def run_fold(
@@ -185,6 +288,7 @@ def run_fold(
     batch_size = _select_batch_size(model_name, params)
 
     output_dim = 4 if loss_name == "hetero" else 2
+    set_seed(params.get("seed", 42))
     model = _build_model(
         model_name,
         checkpoint,
@@ -197,9 +301,13 @@ def run_fold(
 
     print(f"Starting fold {fold_id}")
     trainer.train()
-    predictions = trainer.predict(val_data)
+    predictions = trainer.predict(
+        val_data,
+        ignore_keys=["hidden_states", "attentions"],
+    )
+    prediction_array = _validate_prediction_array(predictions.predictions, output_dim)
 
-    pd.DataFrame(predictions.predictions).to_csv(f"{preds_dir}/{prediction_filename}")
+    pd.DataFrame(prediction_array).to_csv(f"{preds_dir}/{prediction_filename}")
     with open(f"{preds_dir}/{metrics_filename}", "w") as output_file:
         for key, value in predictions.metrics.items():
             output_file.write(f"{key},{value}\n")

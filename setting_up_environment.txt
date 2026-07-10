@@ -1,5 +1,5 @@
 SETTING UP ENVIRONMENT (single source of truth)
-Last updated: 2026-04-27
+Last updated: 2026-07-10
 
 IMPORTANT RULE
 - If setup/install/train commands change, update this file in the SAME commit.
@@ -25,7 +25,12 @@ python -V
 ==================================================
 2) ONE-SHOT INSTALL (recommended)
 ==================================================
-# Installs dependencies + ET setup + English data build
+# Installs dependencies + ET setup + an authorized English data bundle
+DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+DATA_ZIP_SHA256="<expected-sha256>" \
+bash install.sh
+
+# Or put permitted *.tsv files in data/external_english and use local mode
 bash install.sh
 
 Useful options:
@@ -38,8 +43,9 @@ FORCE_DATA=1 bash install.sh
 # include ET model 1 setup too
 WITH_ET1=1 bash install.sh
 
-# custom data zip URL/name
-DATA_ZIP_URL="https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing" \
+# authorized data zip URL/name
+DATA_ZIP_URL="<your-permitted-google-drive-share-url>" \
+DATA_ZIP_SHA256="<expected-sha256>" \
 DATA_ZIP_NAME="english_va_bundle.zip" \
 bash install.sh
 
@@ -51,13 +57,19 @@ pip install -r requirements.txt
 # ET2 checkpoint setup (auto-download from HF if missing)
 python setup_et_models.py --skip-install --skip-et1 --et2-checkpoint ./checkpoints/et_predictor2_seed123
 
-# Build fold datasets (downloads zip from Google Drive via gdown)
-python prepare_english_data.py --output-dir data --seed 42 --force
+# Build fold datasets (downloads an explicitly authorized zip via gdown)
+python prepare_english_data.py \
+  --output-dir data \
+  --seed 42 \
+  --gdrive-file-id "<your-permitted-drive-file-id>" \
+  --gdrive-sha256 "<expected-sha256>" \
+  --force
 
 Expected outputs:
 - data/full_dataset_fold1.csv
 - data/full_dataset_fold2.csv
 - data/full_dataset_english_all.csv
+- data/english_dataset_manifest.json
 
 # Optional: exclude one or more source datasets while keeping existing folds
 python filter_datasets.py --input-dir data --output-dir data_no_iemocap --exclude IEMOCAP
@@ -89,13 +101,45 @@ python train_model.py xlmroberta-large mse \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
   --features-used 0,1,0,1,0 \
   --fp-dropout 0.1,0.3 \
-  --gaze-add-scale 0.05 \
   --batch-size 8 \
   --maxlen 200 \
   --optim adamw_torch \
   --save-total-limit 1
 
-D) GazeAdd with fcomb2.2 (FFD+TRT)
+D) Post-encoder gaze-conditioned pooling
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion conditioned-pooling \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --features-used 0,1,0,1,0
+
+E) Explicit post-encoder CLS-to-token attention with gaze bias
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion postencoder-cls-attention-bias \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --features-used 0,1,0,1,0
+
+F) Gaze-text cross-attention
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion cross-attention \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --features-used 0,1,0,1,0
+
+G) Training-only gaze objectives (no gaze required at inference)
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --features-used 0,1,0,1,0 \
+  --gaze-aux-weight 0.1 \
+  --gaze-alignment-weight 0.05
+
+Offline smoke matrix (five new conditions, both folds):
+PYTHONPATH=src python -m unittest discover -s tests -v
+bash scripts/run_smoke_gaze_strategies.sh
+
+H) GazeAdd with fcomb2.2 (FFD+TRT)
 python train_model.py xlmroberta-large mse \
   --use-gaze-add \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \

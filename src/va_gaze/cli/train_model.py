@@ -15,9 +15,39 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 MODEL_CHOICES = ["distilbert", "xlmroberta-base", "xlmroberta-large"]
 LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc", "hetero"]
-ET_MODEL_CHOICES = ["et2", "emotion-et", "emotion_et", "et-meco", "et_meco"]
+ET_MODEL_CHOICES = [
+    "et2",
+    "emotion-et",
+    "emotion_et",
+    "et-meco",
+    "et_meco",
+    "heuristic",
+    "smoke",
+]
 GAZE_TRANSFORM_CHOICES = ["raw", "pca", "gmm"]
-GAZE_FUSION_CHOICES = ["concat", "add", "gmm-adapter", "summary"]
+GAZE_FUSION_CHOICES = [
+    "concat",
+    "add",
+    "gmm-adapter",
+    "summary",
+    "conditioned-pooling",
+    "pooling",
+    "postencoder-cls-attention-bias",
+    "cls-attention-bias",
+    "attention-bias",
+    "cross-attention",
+]
+GAZE_FUSION_ALIASES = {
+    "pooling": "conditioned-pooling",
+    "cls-attention-bias": "postencoder-cls-attention-bias",
+    "attention-bias": "postencoder-cls-attention-bias",
+}
+LEGACY_GAZE_FUSIONS = {"concat", "add", "gmm-adapter", "summary"}
+MODEL_HIDDEN_SIZES = {
+    "distilbert": 768,
+    "xlmroberta-base": 768,
+    "xlmroberta-large": 1024,
+}
 MODEL_TO_CHECKPOINT = {
     "distilbert": "distilbert-base-multilingual-cased",
     "xlmroberta-base": "xlm-roberta-base",
@@ -59,14 +89,33 @@ def _normalize_et_model_type(raw_value):
     aliases = {
         "emotion_et": "emotion-et",
         "et_meco": "et-meco",
+        "smoke": "heuristic",
     }
     return aliases.get(raw_value, raw_value)
+
+
+def _parse_report_to(raw_value):
+    if raw_value is None:
+        return None
+    targets = [item.strip() for item in str(raw_value).split(",") if item.strip()]
+    if not targets:
+        raise ValueError("report_to must be 'none' or a comma-separated reporter list.")
+    if "none" in targets:
+        if len(targets) != 1:
+            raise ValueError("report_to=none cannot be combined with other reporters.")
+        return []
+    return targets
 
 
 def _build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("model", choices=MODEL_CHOICES)
     parser.add_argument("loss", choices=LOSS_CHOICES)
+    parser.add_argument(
+        "--checkpoint-override",
+        default=None,
+        help="Local or Hugging Face encoder checkpoint overriding the model-name default.",
+    )
     parser.add_argument("--use-gaze-concat", action="store_true")
     parser.add_argument("--use-gaze-add", action="store_true")
     parser.add_argument("--et2-checkpoint", default=None)
@@ -81,6 +130,27 @@ def _build_parser():
     parser.add_argument("--fp-dropout", default="0.0,0.3")
     parser.add_argument("--gaze-add-scale", type=float, default=0.05)
     parser.add_argument("--train-gaze-add-scale", action="store_true")
+    parser.add_argument("--gaze-aux-weight", type=float, default=0.0)
+    parser.add_argument("--gaze-alignment-weight", type=float, default=0.0)
+    parser.add_argument("--gaze-hidden-size", type=int, default=128)
+    parser.add_argument("--gaze-num-heads", type=int, default=4)
+    parser.add_argument("--gaze-num-layers", type=int, default=1)
+    parser.add_argument("--gaze-gate-init", type=float, default=-4.0)
+    parser.add_argument("--gaze-fusion-dropout", type=float, default=0.1)
+    parser.add_argument("--gaze-attention-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--train-gaze-attention-scale",
+        dest="train_gaze_attention_scale",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--fixed-gaze-attention-scale",
+        dest="train_gaze_attention_scale",
+        action="store_false",
+    )
+    parser.add_argument("--gaze-alignment-dim", type=int, default=128)
+    parser.add_argument("--gaze-alignment-temperature", type=float, default=0.07)
+    parser.add_argument("--gaze-alignment-max-tokens", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--batch-size-distil", type=int, default=None)
     parser.add_argument("--batch-size-xlmrb", dest="batch_size_xlmrB", type=int, default=None)
@@ -98,6 +168,17 @@ def _build_parser():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--maxlen", type=int, default=200)
     parser.add_argument("--data-dir", type=str, default="data")
+    parser.add_argument(
+        "--report-to",
+        default=None,
+        help="Comma-separated Transformers reporters, or 'none' to disable reporting.",
+    )
+    parser.add_argument(
+        "--preds-dir",
+        type=str,
+        default=None,
+        help="Optional deterministic prediction/output directory (useful for smoke runs).",
+    )
     parser.add_argument("--save-strategy", choices=["epoch", "no"], default="epoch")
     parser.add_argument("--save-total-limit", type=int, default=1)
     parser.add_argument("--save-final-model", dest="save_final_model", action="store_true")
@@ -114,6 +195,7 @@ def _build_parser():
     )
     parser.set_defaults(load_best_model_at_end=True)
     parser.set_defaults(save_final_model=True)
+    parser.set_defaults(train_gaze_attention_scale=True)
     return parser
 
 
@@ -137,11 +219,36 @@ def _validate_args(parser, args):
             _validate_positive_int("batch_size_xlmrB", args.batch_size_xlmrB)
         if args.batch_size_xlmrL is not None:
             _validate_positive_int("batch_size_xlmrL", args.batch_size_xlmrL)
+        args.report_to = _parse_report_to(args.report_to)
     except ValueError as exc:
         parser.error(str(exc))
 
     if args.gaze_add_scale < 0:
         parser.error("gaze_add_scale must be >= 0.")
+
+    if args.gaze_aux_weight < 0:
+        parser.error("gaze_aux_weight must be >= 0.")
+    if args.gaze_alignment_weight < 0:
+        parser.error("gaze_alignment_weight must be >= 0.")
+    if args.gaze_attention_scale < 0:
+        parser.error("gaze_attention_scale must be >= 0.")
+    if not 0.0 <= args.gaze_fusion_dropout < 1.0:
+        parser.error("gaze_fusion_dropout must be in [0, 1).")
+    if args.gaze_alignment_temperature <= 0:
+        parser.error("gaze_alignment_temperature must be > 0.")
+    if args.gaze_num_layers < 0:
+        parser.error("gaze_num_layers must be >= 0.")
+
+    for name, value in (
+        ("gaze_hidden_size", args.gaze_hidden_size),
+        ("gaze_num_heads", args.gaze_num_heads),
+        ("gaze_alignment_dim", args.gaze_alignment_dim),
+        ("gaze_alignment_max_tokens", args.gaze_alignment_max_tokens),
+    ):
+        try:
+            _validate_positive_int(name, value)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.hetero_mse_weight < 0:
         parser.error("hetero_mse_weight must be >= 0.")
@@ -161,13 +268,47 @@ def _validate_args(parser, args):
             resolved_fusion = "concat"
         elif args.use_gaze_add:
             resolved_fusion = "add"
+    resolved_fusion = GAZE_FUSION_ALIASES.get(resolved_fusion, resolved_fusion)
+    has_training_objective = args.gaze_aux_weight > 0 or args.gaze_alignment_weight > 0
+    gaze_enabled = bool(
+        resolved_fusion
+        or has_training_objective
+    )
+
+    if resolved_fusion in LEGACY_GAZE_FUSIONS and has_training_objective:
+        parser.error(
+            "--gaze-aux-weight/--gaze-alignment-weight can be used alone or with "
+            "post-encoder gaze fusion, but not with legacy concat/add/summary/gmm-adapter."
+        )
+
+    if resolved_fusion in LEGACY_GAZE_FUSIONS and args.et_model_type == "heuristic":
+        parser.error(
+            "--et-model-type heuristic is smoke-only and is not supported by legacy "
+            "concat/add/summary/gmm-adapter fusion."
+        )
+
+    if (
+        resolved_fusion == "cross-attention"
+        and args.gaze_hidden_size % args.gaze_num_heads != 0
+    ):
+        parser.error("cross-attention requires gaze_hidden_size divisible by gaze_num_heads.")
+
+    if (
+        resolved_fusion == "postencoder-cls-attention-bias"
+        and args.checkpoint_override is None
+        and MODEL_HIDDEN_SIZES[args.model] % args.gaze_num_heads != 0
+    ):
+        parser.error(
+            "postencoder-cls-attention-bias requires the encoder hidden size divisible "
+            "by gaze_num_heads."
+        )
 
     if resolved_fusion == "concat" and args.maxlen > 255:
         parser.error(
             "When gaze concat is enabled, maxlen must be <= 255 to avoid positional limit overflow."
         )
 
-    if args.et_model_type == "et-meco" and resolved_fusion and not args.et_model_id:
+    if args.et_model_type == "et-meco" and gaze_enabled and not args.et_model_id:
         parser.error("--et-model-id is required when --et-model-type et-meco is used.")
 
     if args.et_model_type in ("et2", "emotion-et") and args.gaze_transform != "raw":
@@ -199,11 +340,11 @@ def _resolve_batch_sizes(args):
     return batch_size_distil, batch_size_xlmrB, batch_size_xlmrL
 
 
-def _create_run_dir():
+def _create_run_dir(preds_dir_override=None):
     timestamp = datetime.now().strftime("%b-%d_%H-%M-%S")
     host_name = os.environ.get("COMPUTERNAME") or os.environ.get("HOST") or socket.gethostname()
-    preds_dir = f"Preds/{timestamp}_{host_name}"
-    os.makedirs(preds_dir)
+    preds_dir = preds_dir_override or f"Preds/{timestamp}_{host_name}"
+    os.makedirs(preds_dir, exist_ok=bool(preds_dir_override))
     set_preds_dir(preds_dir)
     return timestamp, preds_dir
 
@@ -228,7 +369,7 @@ def main():
 
     features_used, fp_dropout = _validate_args(parser, args)
     batch_size_distil, batch_size_xlmrB, batch_size_xlmrL = _resolve_batch_sizes(args)
-    checkpoint = MODEL_TO_CHECKPOINT[args.model]
+    checkpoint = args.checkpoint_override or MODEL_TO_CHECKPOINT[args.model]
     gaze_config = {
         "use_gaze_concat": args.use_gaze_concat,
         "use_gaze_add": args.use_gaze_add,
@@ -244,9 +385,21 @@ def main():
         "fp_dropout": fp_dropout,
         "gaze_add_scale": args.gaze_add_scale,
         "train_gaze_add_scale": args.train_gaze_add_scale,
+        "gaze_aux_weight": args.gaze_aux_weight,
+        "gaze_alignment_weight": args.gaze_alignment_weight,
+        "gaze_hidden_size": args.gaze_hidden_size,
+        "gaze_num_heads": args.gaze_num_heads,
+        "gaze_num_layers": args.gaze_num_layers,
+        "gaze_gate_init": args.gaze_gate_init,
+        "gaze_fusion_dropout": args.gaze_fusion_dropout,
+        "gaze_attention_scale": args.gaze_attention_scale,
+        "train_gaze_attention_scale": args.train_gaze_attention_scale,
+        "gaze_alignment_dim": args.gaze_alignment_dim,
+        "gaze_alignment_temperature": args.gaze_alignment_temperature,
+        "gaze_alignment_max_tokens": args.gaze_alignment_max_tokens,
     }
 
-    timestamp, preds_dir = _create_run_dir()
+    timestamp, preds_dir = _create_run_dir(args.preds_dir)
     params = {
         "batch_size_distil": batch_size_distil,
         "batch_size_xlmrB": batch_size_xlmrB,
@@ -268,9 +421,12 @@ def main():
         "save_final_model": args.save_final_model,
         "load_best_model_at_end": args.load_best_model_at_end,
         "data_dir": args.data_dir,
+        "report_to": args.report_to,
     }
     run_parameters = {
         "model": args.model,
+        "checkpoint": checkpoint,
+        "checkpoint_override": args.checkpoint_override,
         "loss_function": args.loss,
         "use_gaze_concat": gaze_config["use_gaze_concat"],
         "use_gaze_add": gaze_config["use_gaze_add"],
@@ -286,6 +442,18 @@ def main():
         "fp_dropout": gaze_config["fp_dropout"],
         "gaze_add_scale": gaze_config["gaze_add_scale"],
         "train_gaze_add_scale": gaze_config["train_gaze_add_scale"],
+        "gaze_aux_weight": gaze_config["gaze_aux_weight"],
+        "gaze_alignment_weight": gaze_config["gaze_alignment_weight"],
+        "gaze_hidden_size": gaze_config["gaze_hidden_size"],
+        "gaze_num_heads": gaze_config["gaze_num_heads"],
+        "gaze_num_layers": gaze_config["gaze_num_layers"],
+        "gaze_gate_init": gaze_config["gaze_gate_init"],
+        "gaze_fusion_dropout": gaze_config["gaze_fusion_dropout"],
+        "gaze_attention_scale": gaze_config["gaze_attention_scale"],
+        "train_gaze_attention_scale": gaze_config["train_gaze_attention_scale"],
+        "gaze_alignment_dim": gaze_config["gaze_alignment_dim"],
+        "gaze_alignment_temperature": gaze_config["gaze_alignment_temperature"],
+        "gaze_alignment_max_tokens": gaze_config["gaze_alignment_max_tokens"],
         "path": preds_dir,
         **params,
     }

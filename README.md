@@ -3,9 +3,9 @@ Repository for Quantifying Valence and Arousal in Text with Multilingual Pre-tra
 
 ## Current repository scope
 
-- This repo is now focused on **VA prediction + gaze-concat training**.
+- This repo is focused on **VA prediction with modular gaze-aware training**.
 - RLHF/reward-model code paths were removed.
-- English data preparation uses a **single Google Drive zip** (downloaded with `gdown`).
+- English data preparation can download a user-authorized **Google Drive zip** with `gdown`.
 
 
 ## Dataset
@@ -266,11 +266,19 @@ src/va_gaze/
     setup_et_models.py
     compute_overall_metrics.py
   data/
+    downloads.py
     dataset.py
     prepare_english_data.py
   models/
+    advanced_regression.py
     regression.py
     et2_wrapper.py
+    heuristic_et_wrapper.py
+    gaze/
+      types.py
+      provider.py
+      fusion.py
+      objectives.py
   train/
     custom_trainer.py
     fold_runner.py
@@ -286,16 +294,23 @@ Root scripts (`train_model.py`, `setup_et_models.py`, `prepare_english_data.py`,
 
 ### One-shot setup (new GPU/server)
 
-Run this once on a fresh machine:
+Run this once on a fresh machine after configuring a Google Drive bundle that you
+are allowed to use:
 
 ```bash
+DATA_ZIP_FILE_ID=<your-permitted-drive-file-id> \
+DATA_ZIP_SHA256=<expected-sha256> \
 bash install.sh
 ```
 
 What it does:
 - installs python dependencies from `requirements.txt` (includes `importlib_resources==6.5.2`)
 - prepares ET2 and auto-downloads checkpoint from `skboy/et_prediction_2` if missing
-- builds English dataset files under `data/`
+- validates the configured Drive archive and builds English dataset files under `data/`
+
+No restricted corpus bundle is hard-coded in this repository. If you already placed
+permitted `*.tsv` files under `data/external_english/`, plain `bash install.sh` uses
+those files without attempting a Drive download.
 
 Re-run quickly without reinstalling deps:
 
@@ -324,23 +339,40 @@ automatically downloads `et_predictor2_seed123.safetensors` from:
 
 ### Build English-only dataset (Google Drive zip via gdown)
 
-If you want to run quickly with English data only, use:
+Pass the ID (and preferably the SHA256) of a Google Drive zip that you are licensed
+to use:
 
 ```bash
-python3 prepare_english_data.py --output-dir data --seed 42
+python3 prepare_english_data.py \
+  --output-dir data \
+  --seed 42 \
+  --gdrive-file-id <your-permitted-drive-file-id> \
+  --gdrive-sha256 <expected-sha256>
 ```
 
-The script is idempotent: if `full_dataset_fold1.csv`, `full_dataset_fold2.csv`, and
-`full_dataset_english_all.csv` already exist, it skips rebuilding unless `--force` is used.
+The zip may instead be specified with `--gdrive-zip-url`. There is deliberately no
+default Drive ID or URL: IEMOCAP, EmoTales, and several other sources require an
+individual release or permission and must not be redistributed through a public
+repository bundle.
 
-By default it downloads this zip from Google Drive (via `gdown`) and extracts TSV files:
-- `https://drive.google.com/file/d/1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj/view?usp=sharing`
+Downloads use a temporary `.part` file, validate the zip CRC and member paths, and
+atomically replace the cached archive only after validation succeeds. An optional
+checksum can be enforced with `--gdrive-sha256 <sha256>`. Cache metadata binds a
+downloaded archive to its requested Drive source, so changing the ID cannot silently
+reuse an unrelated zip. To require a previously validated cached archive without
+network access, add `--offline`; repeating the source ID/checksum additionally enforces
+an exact request match against the source-bound cache metadata.
+
+Only download or process source datasets whose licenses you have accepted. Restricted
+sources such as IEMOCAP still need to be obtained under their original terms; this
+downloader is only a transport mechanism and does not grant data rights.
 
 This creates:
 - `data/full_dataset_fold1.csv`
 - `data/full_dataset_fold2.csv`
 - `data/full_dataset_english_all.csv`
-- `data/external_english/*.tsv` (extracted source files)
+- `data/english_dataset_manifest.json` (source/config/output hashes)
+- `data/external_english/.va_gaze_extracted/<version>/*.tsv` (managed archive extraction)
 
 If you already have local TSV files and do not want to download again:
 
@@ -348,14 +380,21 @@ If you already have local TSV files and do not want to download again:
 python3 prepare_english_data.py --output-dir data --seed 42 --force --skip-gdrive-download
 ```
 
-The builder auto-loads every `*.tsv` in `data/external_english/` when columns
-`text`, `valence`, and `arousal` are present.
-(`data/external_english/` is auto-created if missing.)
+In local/skip mode, the builder loads every direct `*.tsv` in
+`data/external_english/` when the columns `text`, `valence`, and `arousal` are
+present. For downloaded archives it loads only the active managed extraction selected
+by `.va_gaze_extraction.json`, so files from two archive versions cannot be mixed.
+The build manifest makes cache reuse conditional on the source hashes, split seed,
+normalization, and output hashes; corrupt or stale outputs are rebuilt automatically.
 
 If you prefer another dataset folder:
 
 ```bash
-python3 prepare_english_data.py --output-dir /path/to/my_data --seed 42 --force
+python3 prepare_english_data.py \
+  --output-dir /path/to/my_data \
+  --seed 42 \
+  --gdrive-file-id <your-permitted-drive-file-id> \
+  --force
 ```
 
 To exclude one or more source datasets while keeping the existing fold split:
@@ -373,7 +412,7 @@ python train_model.py xlmroberta-large mse --data-dir data_no_iemocap
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**
-- Loss function: **mse** or **ccc** or **robust** or **mse+ccc** or **robust+ccc**
+- Loss function: **mse**, **ccc**, **robust**, **mse+ccc**, **robust+ccc**, or **hetero**
 
 ### GazeConcat / GazeAdd (ET model 2) for VA
 
@@ -411,6 +450,86 @@ python train_model.py xlmroberta-base mse+ccc \
   - `--save-total-limit` (default `1`) keeps only recent checkpoints to reduce disk usage.
   - `--save-strategy no` disables periodic checkpoint saving (useful on low-storage GPUs).
 
+### Post-encoder gaze strategies
+
+The following options preserve `[CLS]` and every text token at their original input
+positions. They share a lazy gaze provider and a common regression head:
+
+- `conditioned-pooling`: gaze-conditioned attention pools contextual text tokens and
+  adds the pooled representation to CLS through a learned gate.
+- `postencoder-cls-attention-bias`: a portable post-encoder CLS-to-token attention block adds a
+  soft gaze-derived bias to its attention logits. It does not patch internal
+  DistilBERT/RoBERTa attention implementations and therefore cannot change the
+  encoder's already-computed CLS state; it changes the downstream representation
+  consumed by the regression head.
+- `cross-attention`: CLS queries a separately projected text-order gaze stream through
+  gated cross-attention.
+
+`cls-attention-bias` and `attention-bias` remain accepted aliases for the explicit
+`postencoder-cls-attention-bias` name.
+
+Examples:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion conditioned-pooling \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --features-used 0,1,0,1,0
+
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion postencoder-cls-attention-bias \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-attention-scale 0.1
+
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion cross-attention \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-hidden-size 128 \
+  --gaze-num-heads 4
+```
+
+Two training-only objectives are orthogonal to the primary fusion choice:
+
+- `--gaze-aux-weight`: masked Smooth-L1 gaze reconstruction from contextual text
+  states.
+- `--gaze-alignment-weight`: symmetric token-level InfoNCE alignment of text and gaze.
+
+They can be used alone or combined with any post-encoder strategy:
+
+```bash
+python train_model.py xlmroberta-base mse+ccc \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-aux-weight 0.1
+
+python train_model.py xlmroberta-base mse+ccc \
+  --gaze-fusion conditioned-pooling \
+  --et-model-type emotion-et \
+  --et-model-id skboy/emotion_et_model \
+  --gaze-aux-weight 0.1 \
+  --gaze-alignment-weight 0.05
+```
+
+For objective-only runs, gaze generation is lazy and occurs only while the model is
+training; evaluation and deployment use the ordinary text/CLS path. The current ET
+predictors expose token-level aggregate features in text order. They do not expose
+fixation events or scanpath order, so the code intentionally does not label the gaze
+stream as a scanpath model.
+
+The auxiliary target uses a batch-independent signed-`log1p` transform; it never
+normalizes targets from the current minibatch. The InfoNCE objective treats other
+valid tokens as negatives, so use informative feature combinations such as FFD+TRT
+rather than a nearly constant feature alone. `--fp-dropout` controls legacy gaze
+projectors; post-encoder methods use `--gaze-fusion-dropout`.
+
+Advanced-model saves include `advanced_gaze_manifest.json`, the encoder config,
+tokenizer, and any PCA/GMM transform artifacts. They can be reconstructed offline with
+`GazeFusionForSequenceRegression.from_pretrained(<saved-directory>)`; the external
+frozen ET predictor identifier is recorded and can be overridden with a local path.
+
 ### Experiment matrix (single README version)
 
 Default VA hyperparameters (unchanged):
@@ -428,13 +547,14 @@ Full CLI:
 
 ```bash
 python train_model.py <model> <loss> \
+  [--checkpoint-override <local_or_hf_checkpoint>] \
   [--use-gaze-concat] \
   [--use-gaze-add] \
   [--et2-checkpoint <path>] \
   [--et-model-type et2|emotion-et|et-meco] \
   [--et-model-id <hf_repo_or_local_path>] \
   [--gaze-transform raw|pca|gmm] \
-  [--gaze-fusion concat|add|gmm-adapter] \
+  [--gaze-fusion concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention] \
   [--gaze-artifact-dir <path>] \
   [--gmm-components <int>] \
   [--pca-components <int>] \
@@ -442,6 +562,17 @@ python train_model.py <model> <loss> \
   [--fp-dropout <p1,p2>] \
   [--gaze-add-scale <float>] \
   [--train-gaze-add-scale] \
+  [--gaze-aux-weight <float>] \
+  [--gaze-alignment-weight <float>] \
+  [--gaze-hidden-size <int>] \
+  [--gaze-num-heads <int>] \
+  [--gaze-num-layers <int>] \
+  [--gaze-gate-init <float>] \
+  [--gaze-fusion-dropout <float>] \
+  [--gaze-attention-scale <float>] \
+  [--gaze-alignment-dim <int>] \
+  [--gaze-alignment-temperature <float>] \
+  [--gaze-alignment-max-tokens <int>] \
   [--batch-size <int>] \
   [--learning-rate <float>] \
   [--train-epochs <int>] \
@@ -452,8 +583,23 @@ python train_model.py <model> <loss> \
   [--gradient-accumulation-steps <int>] \
   [--seed <int>] \
   [--maxlen <int>] \
-  [--data-dir <path>]
+  [--data-dir <path>] \
+  [--report-to none|<comma-separated-reporters>]
 ```
+
+### Reproducible offline smoke matrix
+
+The smoke harness creates a tiny random encoder/tokenizer and legal synthetic VA folds,
+then runs both folds for one optimizer step under all five new conditions:
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
+bash scripts/run_smoke_gaze_strategies.sh
+```
+
+Smoke outputs and logs are written under `artifacts/gaze_strategy_smoke/`. The
+`heuristic` ET backend used by this script is deterministic and strictly for plumbing
+tests; it is not a scientific gaze predictor and should not be used for reported runs.
 
 Feature flag order is always: `nFix,FFD,GPT,TRT,fixProp`.
 Examples:
@@ -583,5 +729,7 @@ python compute_overall_metrics.py Preds/<run-directory>
 
 ## License
 
-This repository is released under the MIT License.
+The source code in this repository is released under the MIT License. The license
+does not apply to third-party datasets, model weights, or artifacts; their original
+licenses and access terms remain in force.
 See `LICENSE`.
