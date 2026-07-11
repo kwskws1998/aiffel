@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproducible DistilBERT VA experiment runner.
-# Groups: CONDITIONS=core, CONDITIONS=new, CONDITIONS=all, or a comma-separated list.
+# Groups: CONDITIONS=core, CONDITIONS=new, CONDITIONS=trt, CONDITIONS=all, or a list.
 
 set -euo pipefail
 
@@ -11,17 +11,19 @@ usage() {
     "Condition groups:" \
     "  CONDITIONS=core   baseline, postfix FFD+TRT, GazeAdd FFD+TRT" \
     "  CONDITIONS=new    baseline, postfix, summary, three post-encoder methods, two objectives" \
+    "  CONDITIONS=trt    baseline and all non-legacy gaze strategies using TRT only" \
     "  CONDITIONS=all    every condition, including all-feature postfix and legacy prefix" \
     "  CONDITIONS=a,b    custom comma- or space-separated condition names" \
     "" \
     "Conditions:" \
-    "  baseline postfix_all postfix_ffd_trt gaze_add_ffd_trt" \
+    "  baseline postfix_all postfix_ffd_trt postfix_trt gaze_add_ffd_trt gaze_add_trt" \
     "  gaze_summary_ffd_trt conditioned_pooling cls_attention_bias" \
     "  cross_attention auxiliary_only alignment_only prefix_legacy" \
     "" \
     "Main variables:" \
     "  LOSS=mse BATCH_SIZE=8 MAXLEN=200 TRAIN_EPOCHS=10 SEED=42" \
     "  DATA_DIR=data ET_MODEL_TYPE=et2 ET2_CHECKPOINT=./checkpoints/et_predictor2_seed123" \
+    "  ET_MODEL_TYPE=emotion-trt ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10" \
     "  OUTPUT_ROOT=Preds/distilbert_matrix_<timestamp>" \
     "  SAVE_STRATEGY=epoch SAVE_FINAL_MODEL=1 REQUIRE_CUDA=0 DRY_RUN=0"
 }
@@ -54,6 +56,7 @@ SEED="${SEED:-42}"
 DATA_DIR="${DATA_DIR:-data}"
 ET_MODEL_TYPE="${ET_MODEL_TYPE:-et2}"
 ET2_CHECKPOINT="${ET2_CHECKPOINT:-./checkpoints/et_predictor2_seed123}"
+ET_MODEL_ID="${ET_MODEL_ID:-}"
 FP_DROPOUT="${FP_DROPOUT:-0.1,0.3}"
 SAVE_STRATEGY="${SAVE_STRATEGY:-epoch}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-1}"
@@ -67,7 +70,8 @@ REQUIRE_CUDA="${REQUIRE_CUDA:-0}"
 
 CORE_CONDITIONS=(baseline postfix_ffd_trt gaze_add_ffd_trt)
 NEW_CONDITIONS=(baseline postfix_ffd_trt gaze_summary_ffd_trt conditioned_pooling cls_attention_bias cross_attention auxiliary_only alignment_only)
-ALL_CONDITIONS=(baseline postfix_all postfix_ffd_trt gaze_add_ffd_trt gaze_summary_ffd_trt conditioned_pooling cls_attention_bias cross_attention auxiliary_only alignment_only prefix_legacy)
+TRT_CONDITIONS=(baseline postfix_trt gaze_add_trt gaze_summary_trt conditioned_pooling_trt cls_attention_bias_trt cross_attention_trt auxiliary_only_trt alignment_only_trt)
+ALL_CONDITIONS=(baseline postfix_all postfix_ffd_trt postfix_trt gaze_add_ffd_trt gaze_add_trt gaze_summary_ffd_trt gaze_summary_trt conditioned_pooling conditioned_pooling_trt cls_attention_bias cls_attention_bias_trt cross_attention cross_attention_trt auxiliary_only auxiliary_only_trt alignment_only alignment_only_trt prefix_legacy)
 
 case "$CONDITIONS" in
   core)
@@ -75,6 +79,9 @@ case "$CONDITIONS" in
     ;;
   new)
     SELECTED_CONDITIONS=("${NEW_CONDITIONS[@]}")
+    ;;
+  trt)
+    SELECTED_CONDITIONS=("${TRT_CONDITIONS[@]}")
     ;;
   all)
     SELECTED_CONDITIONS=("${ALL_CONDITIONS[@]}")
@@ -98,9 +105,24 @@ for condition in "${SELECTED_CONDITIONS[@]}"; do
   fi
 done
 
-if [[ "$ET_MODEL_TYPE" != "et2" && "$ET_MODEL_TYPE" != "heuristic" ]]; then
-  echo "ET_MODEL_TYPE must be et2 or heuristic." >&2
+case "$ET_MODEL_TYPE" in
+  emotion_trt|emotion_trt_roberta|emotion-trt-roberta)
+    ET_MODEL_TYPE="emotion-trt"
+    ;;
+  emotion_et)
+    ET_MODEL_TYPE="emotion-et"
+    ;;
+esac
+
+if [[ "$ET_MODEL_TYPE" != "et2" && "$ET_MODEL_TYPE" != "emotion-et" && "$ET_MODEL_TYPE" != "emotion-trt" && "$ET_MODEL_TYPE" != "heuristic" ]]; then
+  echo "ET_MODEL_TYPE must be et2, emotion-et, emotion-trt, or heuristic." >&2
   exit 2
+fi
+
+if [[ "$ET_MODEL_TYPE" == "emotion-trt" && -z "$ET_MODEL_ID" ]]; then
+  ET_MODEL_ID="skboy/emotion_trt_roberta_lr2e5_preval10"
+elif [[ "$ET_MODEL_TYPE" == "emotion-et" && -z "$ET_MODEL_ID" ]]; then
+  ET_MODEL_ID="skboy/emotion_et_model"
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
@@ -151,13 +173,15 @@ ET_ARGS=(
 )
 if [[ "$ET_MODEL_TYPE" == "et2" ]]; then
   ET_ARGS+=(--et2-checkpoint "$ET2_CHECKPOINT")
+elif [[ "$ET_MODEL_TYPE" == "emotion-et" || "$ET_MODEL_TYPE" == "emotion-trt" ]]; then
+  ET_ARGS+=(--et-model-id "$ET_MODEL_ID")
 fi
 
 require_et_source() {
   if [[ "$DRY_RUN" == "1" ]]; then
     return
   fi
-  if [[ "$ET_MODEL_TYPE" == "heuristic" ]]; then
+  if [[ "$ET_MODEL_TYPE" != "et2" ]]; then
     return
   fi
   if [[ -f "$ET2_CHECKPOINT" || -f "$ET2_CHECKPOINT.safetensors" || -f "$ET2_CHECKPOINT.pt" || -f "$ET2_CHECKPOINT.bin" ]]; then
@@ -211,33 +235,65 @@ for condition in "${SELECTED_CONDITIONS[@]}"; do
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion postfix-concat --features-used 0,1,0,1,0
       ;;
+    postfix_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion postfix-concat --features-used 0,0,0,1,0
+      ;;
     gaze_add_ffd_trt)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion add --features-used 0,1,0,1,0 --gaze-add-scale 0.05
+      ;;
+    gaze_add_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion add --features-used 0,0,0,1,0 --gaze-add-scale 0.05
       ;;
     gaze_summary_ffd_trt)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion summary --features-used 0,1,0,1,0
       ;;
+    gaze_summary_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion summary --features-used 0,0,0,1,0
+      ;;
     conditioned_pooling)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion conditioned-pooling --features-used 0,1,0,1,0
+      ;;
+    conditioned_pooling_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion conditioned-pooling --features-used 0,0,0,1,0
       ;;
     cls_attention_bias)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion postencoder-cls-attention-bias --features-used 0,1,0,1,0
       ;;
+    cls_attention_bias_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion postencoder-cls-attention-bias --features-used 0,0,0,1,0
+      ;;
     cross_attention)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion cross-attention --features-used 0,1,0,1,0
+      ;;
+    cross_attention_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --gaze-fusion cross-attention --features-used 0,0,0,1,0
       ;;
     auxiliary_only)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --features-used 0,1,0,1,0 --gaze-aux-weight 0.1
       ;;
+    auxiliary_only_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --features-used 0,0,0,1,0 --gaze-aux-weight 0.1
+      ;;
     alignment_only)
       require_et_source
       run_condition "$condition" "${ET_ARGS[@]}" --features-used 0,1,0,1,0 --gaze-alignment-weight 0.05
+      ;;
+    alignment_only_trt)
+      require_et_source
+      run_condition "$condition" "${ET_ARGS[@]}" --features-used 0,0,0,1,0 --gaze-alignment-weight 0.05
       ;;
     prefix_legacy)
       require_et_source

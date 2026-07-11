@@ -2,6 +2,10 @@ from collections import OrderedDict
 
 import torch
 
+from va_gaze.models.gaze.feature_schema import (
+    TRT_ONLY_FEATURE_INDICES,
+    select_feature_indices,
+)
 from va_gaze.models.gaze.types import GazeBatch
 from va_gaze.models.gaze_transform import GazeFeatureTransformer
 
@@ -9,6 +13,9 @@ from va_gaze.models.gaze_transform import GazeFeatureTransformer
 def normalize_et_model_type(raw_value):
     aliases = {
         "emotion_et": "emotion-et",
+        "emotion_trt": "emotion-trt",
+        "emotion_trt_roberta": "emotion-trt",
+        "emotion-trt-roberta": "emotion-trt",
         "et_meco": "et-meco",
         "legacy-et2": "et2",
         "smoke": "heuristic",
@@ -42,11 +49,15 @@ class GazeFeatureProvider:
         self.fixation_cache = OrderedDict()
         self.max_fix_cache_size = int(max_fix_cache_size)
 
-        if self.et_model_type in ("et2", "emotion-et", "heuristic"):
-            flags = features_used or [1, 1, 1, 1, 1]
-            self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
-            if not self.feature_indices:
-                raise ValueError("features_used must enable at least one ET feature.")
+        if self.et_model_type in ("et2", "emotion-et", "emotion-trt", "heuristic"):
+            supported_indices = (
+                TRT_ONLY_FEATURE_INDICES if self.et_model_type == "emotion-trt" else None
+            )
+            self.feature_indices = select_feature_indices(
+                features_used,
+                supported_indices=supported_indices,
+                model_label=self.et_model_type,
+            )
             self.raw_feature_dim = len(self.feature_indices)
         elif self.et_model_type == "et-meco":
             self.feature_indices = None
@@ -80,6 +91,13 @@ class GazeFeatureProvider:
             from va_gaze.models.emotion_et_wrapper import EmotionEtFixationsPredictor
 
             predictor = EmotionEtFixationsPredictor(
+                modelTokenizer=self.tokenizer,
+                model_id=self.et_model_id or self.et2_checkpoint_path,
+            )
+        elif self.et_model_type == "emotion-trt":
+            from va_gaze.models.emotion_trt_et_wrapper import EmotionTrtFixationsPredictor
+
+            predictor = EmotionTrtFixationsPredictor(
                 modelTokenizer=self.tokenizer,
                 model_id=self.et_model_id or self.et2_checkpoint_path,
             )

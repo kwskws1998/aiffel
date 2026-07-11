@@ -16,12 +16,19 @@ from va_gaze.models.gaze.concat import (
     compose_gaze_concat_inputs,
     normalize_concat_order,
 )
+from va_gaze.models.gaze.feature_schema import (
+    TRT_ONLY_FEATURE_INDICES,
+    select_feature_indices,
+)
 from va_gaze.models.gaze_transform import GazeFeatureTransformer
 
 
 def _normalize_et_model_type(raw_value):
     aliases = {
         "emotion_et": "emotion-et",
+        "emotion_trt": "emotion-trt",
+        "emotion_trt_roberta": "emotion-trt",
+        "emotion-trt-roberta": "emotion-trt",
         "et_meco": "et-meco",
         "smoke": "heuristic",
     }
@@ -256,10 +263,10 @@ class GazeConcatForSequenceRegression(nn.Module):
         load_fixation_model=True,
     ):
         if self.et_model_type in ("et2", "legacy-et2", "heuristic"):
-            flags = features_used or [1, 1, 1, 1, 1]
-            self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
-            if not self.feature_indices:
-                raise ValueError("features_used must enable at least one ET feature.")
+            self.feature_indices = select_feature_indices(
+                features_used,
+                model_label=self.et_model_type,
+            )
             if load_fixation_model:
                 if self.et_model_type == "heuristic":
                     self.fp_model = self._load_heuristic_predictor()
@@ -268,12 +275,24 @@ class GazeConcatForSequenceRegression(nn.Module):
             return len(self.feature_indices)
 
         if self.et_model_type == "emotion-et":
-            flags = features_used or [1, 1, 1, 1, 1]
-            self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
-            if not self.feature_indices:
-                raise ValueError("features_used must enable at least one ET feature.")
+            self.feature_indices = select_feature_indices(
+                features_used,
+                model_label=self.et_model_type,
+            )
             if load_fixation_model:
                 self.fp_model = self._load_emotion_et_predictor(et_model_id or et2_checkpoint_path)
+            return len(self.feature_indices)
+
+        if self.et_model_type == "emotion-trt":
+            self.feature_indices = select_feature_indices(
+                features_used,
+                supported_indices=TRT_ONLY_FEATURE_INDICES,
+                model_label=self.et_model_type,
+            )
+            if load_fixation_model:
+                self.fp_model = self._load_emotion_trt_predictor(
+                    et_model_id or et2_checkpoint_path
+                )
             return len(self.feature_indices)
 
         if self.et_model_type == "et-meco":
@@ -317,6 +336,25 @@ class GazeConcatForSequenceRegression(nn.Module):
             ) from exc
 
         fp_model = EmotionEtFixationsPredictor(
+            modelTokenizer=self.tokenizer,
+            model_id=et_model_id,
+        )
+        if hasattr(fp_model, "model"):
+            fp_model.model.eval()
+            for param in fp_model.model.parameters():
+                param.requires_grad = False
+        return fp_model
+
+    def _load_emotion_trt_predictor(self, et_model_id):
+        try:
+            from va_gaze.models.emotion_trt_et_wrapper import EmotionTrtFixationsPredictor
+        except ImportError as exc:
+            raise ImportError(
+                "Could not import EmotionTrtFixationsPredictor. "
+                "Install huggingface_hub/safetensors/transformers."
+            ) from exc
+
+        fp_model = EmotionTrtFixationsPredictor(
             modelTokenizer=self.tokenizer,
             model_id=et_model_id,
         )

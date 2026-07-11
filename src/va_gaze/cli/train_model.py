@@ -19,6 +19,10 @@ ET_MODEL_CHOICES = [
     "et2",
     "emotion-et",
     "emotion_et",
+    "emotion-trt",
+    "emotion_trt",
+    "emotion-trt-roberta",
+    "emotion_trt_roberta",
     "et-meco",
     "et_meco",
     "heuristic",
@@ -101,6 +105,9 @@ def _validate_positive_int(name, value):
 def _normalize_et_model_type(raw_value):
     aliases = {
         "emotion_et": "emotion-et",
+        "emotion_trt": "emotion-trt",
+        "emotion_trt_roberta": "emotion-trt",
+        "emotion-trt-roberta": "emotion-trt",
         "et_meco": "et-meco",
         "smoke": "heuristic",
     }
@@ -319,7 +326,17 @@ def _validate_args(parser, args):
     if args.et_model_type == "et-meco" and gaze_enabled and not args.et_model_id:
         parser.error("--et-model-id is required when --et-model-type et-meco is used.")
 
-    if args.et_model_type in ("et2", "emotion-et") and args.gaze_transform != "raw":
+    if (
+        args.et_model_type == "emotion-trt"
+        and gaze_enabled
+        and features_used != [0, 0, 0, 1, 0]
+    ):
+        parser.error(
+            "--et-model-type emotion-trt predicts TRT only; use "
+            "--features-used 0,0,0,1,0."
+        )
+
+    if args.et_model_type in ("et2", "emotion-et", "emotion-trt") and args.gaze_transform != "raw":
         parser.error("PCA/GMM transforms are currently supported for --et-model-type et-meco only.")
 
     if resolved_fusion == "gmm-adapter":

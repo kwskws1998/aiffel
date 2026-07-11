@@ -112,6 +112,32 @@ class TrainCliValidationTest(unittest.TestCase):
         )
         self.assertEqual(args.report_to, [])
 
+    def test_emotion_trt_alias_requires_trt_only_when_gaze_is_enabled(self):
+        args = parse_and_validate(
+            [
+                "xlmroberta-base",
+                "mse",
+                "--gaze-fusion",
+                "postfix-concat",
+                "--et-model-type",
+                "emotion_trt",
+                "--features-used",
+                "0,0,0,1,0",
+            ]
+        )
+        self.assertEqual(args.et_model_type, "emotion-trt")
+        self.assert_cli_error(
+            [
+                "--gaze-fusion",
+                "postfix-concat",
+                "--et-model-type",
+                "emotion-trt",
+                "--features-used",
+                "0,1,0,1,0",
+            ],
+            "predicts TRT only",
+        )
+
     def test_model_factory_also_rejects_silent_legacy_downgrade(self):
         with self.assertRaisesRegex(
             ValueError,

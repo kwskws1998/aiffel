@@ -23,6 +23,53 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
+fail_install() {
+  printf '[error] %s\n' "$1" >&2
+  exit 2
+}
+
+is_placeholder_value() {
+  local value="${1:-}"
+  [[ "$value" == *"<"* || "$value" == *">"* || "$value" == *"Google-Drive-file-id"* || "$value" == *"your-permitted-drive-file-id"* ]]
+}
+
+validate_environment() {
+  if [[ -n "${CONDA_PREFIX:-}" && -n "${VIRTUAL_ENV:-}" ]]; then
+    cat >&2 <<EOF
+[error] Conda and virtualenv are active at the same time.
+  CONDA_PREFIX=$CONDA_PREFIX
+  VIRTUAL_ENV=$VIRTUAL_ENV
+
+Run these commands, then retry:
+  deactivate
+  unset PYTHON_BIN VIRTUAL_ENV
+  hash -r
+  conda activate ${CONDA_DEFAULT_ENV:-va_gaze}
+  export PYTHON_BIN="\$CONDA_PREFIX/bin/python"
+EOF
+    exit 2
+  fi
+
+  if is_placeholder_value "${DATA_ZIP_FILE_ID:-}"; then
+    cat >&2 <<'EOF'
+[error] DATA_ZIP_FILE_ID still contains an example placeholder.
+Replace it with the actual Google Drive file id, for example:
+  export DATA_ZIP_FILE_ID="1AbC...actual-id...XyZ"
+
+Or use permitted local TSV files:
+  unset DATA_ZIP_FILE_ID DATA_ZIP_URL
+  Put the TSV files under data/external_english/ before rerunning install.sh.
+EOF
+    exit 2
+  fi
+
+  if is_placeholder_value "${DATA_ZIP_URL:-}"; then
+    fail_install "DATA_ZIP_URL still contains an example placeholder; set a real share URL or unset it."
+  fi
+}
+
+validate_environment
+
 PYTHON_BIN="${PYTHON_BIN:-python}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   PYTHON_BIN="python3"

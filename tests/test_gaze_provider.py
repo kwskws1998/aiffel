@@ -104,6 +104,25 @@ class GazeProviderTest(unittest.TestCase):
                 torch.tensor([[0, 1, 1, 1]]),
             )
 
+    def test_emotion_trt_provider_accepts_only_trt_feature(self):
+        provider = GazeFeatureProvider(
+            tokenizer=DummyTokenizer(),
+            et_model_type="emotion_trt",
+            features_used=[0, 0, 0, 1, 0],
+            load_fixation_model=False,
+        )
+        self.assertEqual(provider.et_model_type, "emotion-trt")
+        self.assertEqual(provider.feature_indices, [3])
+        self.assertEqual(provider.feature_dim, 1)
+
+        with self.assertRaisesRegex(ValueError, "does not predict: FFD"):
+            GazeFeatureProvider(
+                tokenizer=DummyTokenizer(),
+                et_model_type="emotion-trt",
+                features_used=[0, 1, 0, 1, 0],
+                load_fixation_model=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

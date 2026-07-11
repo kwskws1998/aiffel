@@ -9,6 +9,8 @@ import torch
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, RobertaConfig, RobertaModel
 
+from va_gaze.models.gaze.feature_schema import FEATURE_NAMES, TRT_INDEX
+
 try:
     from huggingface_hub import snapshot_download
 except ImportError:
@@ -17,16 +19,15 @@ except ImportError:
 
 DEFAULT_REPO_ID = "skboy/emotion_et_model"
 DEFAULT_WEIGHT_NAME = "et_predictor2_iitb_scalezero_seed42.safetensors"
-FEATURE_NAMES = ["nFix", "FFD", "GPT", "TRT", "fixProp"]
 WINDOW_SIZE = 512
 
 
 class _EmotionEtRegressionModel(torch.nn.Module):
-    def __init__(self, config_path):
+    def __init__(self, config_path, output_dim):
         super().__init__()
         config = RobertaConfig.from_pretrained(config_path)
         self.roberta = RobertaModel(config)
-        self.decoder = torch.nn.Linear(config.hidden_size, len(FEATURE_NAMES))
+        self.decoder = torch.nn.Linear(config.hidden_size, output_dim)
 
     def forward(self, input_ids, attention_mask):
         hidden = self.roberta(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
@@ -36,18 +37,26 @@ class _EmotionEtRegressionModel(torch.nn.Module):
 class EmotionEtFixationsPredictor:
     """Adapter exposing the same _compute_mapped_fixations interface as ET2."""
 
-    def __init__(self, modelTokenizer, model_id=None, weight_name=None, max_length=WINDOW_SIZE, device=None):
+    def __init__(
+        self,
+        modelTokenizer,
+        model_id=None,
+        weight_name=None,
+        max_length=WINDOW_SIZE,
+        device=None,
+        local_files_only_env="EMOTION_ET_LOCAL_FILES_ONLY",
+    ):
         self.rm_tokenizer = modelTokenizer
         self.model_id = model_id or os.environ.get("EMOTION_ET_MODEL_ID") or DEFAULT_REPO_ID
         self.weight_name = weight_name or os.environ.get("EMOTION_ET_WEIGHT_NAME") or DEFAULT_WEIGHT_NAME
         self.max_length = int(max_length)
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.local_files_only_env = local_files_only_env
         self.model_dir = self._resolve_model_dir(self.model_id)
         self.roberta_tokenizer = AutoTokenizer.from_pretrained(self.model_dir, add_prefix_space=True)
-        self.model = _EmotionEtRegressionModel(self.model_dir).to(self.device)
         self._load_weights()
         self.model.eval()
-        self.feature_names = FEATURE_NAMES
+        self.feature_names = list(FEATURE_NAMES)
         self.feature_dim = len(FEATURE_NAMES)
         print(f"[emotion_et_wrapper] EmotionEtFixationsPredictor loaded: {self.model_dir}")
 
@@ -57,7 +66,7 @@ class EmotionEtFixationsPredictor:
             return candidate
         if snapshot_download is None:
             raise ImportError("huggingface_hub is required to download skboy/emotion_et_model.")
-        local_files_only = os.environ.get("EMOTION_ET_LOCAL_FILES_ONLY", "").lower() in {
+        local_files_only = os.environ.get(self.local_files_only_env, "").lower() in {
             "1",
             "true",
             "yes",
@@ -75,6 +84,19 @@ class EmotionEtFixationsPredictor:
                     f"Emotion ET weight not found: {self.model_dir / self.weight_name}"
                 )
         state = load_file(str(weight_path), device=str(self.device))
+        decoder_weight = state.get("decoder.weight")
+        if decoder_weight is None:
+            raise KeyError(f"Missing decoder.weight in Emotion ET weights: {weight_path}")
+        self.native_feature_dim = int(decoder_weight.shape[0])
+        if self.native_feature_dim not in (1, len(FEATURE_NAMES)):
+            raise ValueError(
+                "Emotion ET predictor must output either TRT only (1) or the full "
+                f"gaze schema ({len(FEATURE_NAMES)}); got {self.native_feature_dim}."
+            )
+        self.model = _EmotionEtRegressionModel(
+            self.model_dir,
+            output_dim=self.native_feature_dim,
+        ).to(self.device)
         self.model.load_state_dict(state, strict=True)
         print(f"[emotion_et_wrapper] weights loaded: {weight_path}")
 
@@ -115,14 +137,21 @@ class EmotionEtFixationsPredictor:
             token_preds = self.model(input_ids=input_ids, attention_mask=attention_mask)
         token_preds = token_preds.squeeze(0).clamp_min(0.0).detach().cpu().numpy()
 
-        word_features = np.zeros((len(words), self.feature_dim), dtype=np.float32)
+        native_features = np.zeros((len(words), self.native_feature_dim), dtype=np.float32)
         seen = set()
         for token_idx, word_idx in enumerate(word_ids):
             if word_idx is None or word_idx in seen or word_idx >= len(words):
                 continue
-            word_features[word_idx] = token_preds[token_idx]
+            native_features[word_idx] = token_preds[token_idx]
             seen.add(word_idx)
-        return word_features, words
+        return self._expand_to_full_schema(native_features), words
+
+    def _expand_to_full_schema(self, native_features):
+        if self.native_feature_dim == len(FEATURE_NAMES):
+            return native_features
+        full_features = np.zeros((len(native_features), len(FEATURE_NAMES)), dtype=np.float32)
+        full_features[:, TRT_INDEX] = native_features[:, 0]
+        return full_features
 
     @staticmethod
     def _is_cjk(ch):

@@ -29,9 +29,23 @@ scripts/setup_distilbert_conda_cloud.sh in section 4.
 2) ONE-SHOT INSTALL (recommended)
 ==================================================
 # Installs dependencies + ET setup + an authorized English data bundle
-DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
-DATA_ZIP_SHA256="<expected-sha256>" \
+DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash install.sh
+
+IMPORTANT:
+- The command above contains the verified project bundle ID and SHA256. Replace
+  both only when intentionally using a different authorized bundle.
+- Never export a literal placeholder such as <Google-Drive-file-id>.
+- Do not run Conda and .venv simultaneously. If the prompt shows both, run:
+    deactivate
+    unset PYTHON_BIN VIRTUAL_ENV
+    hash -r
+    conda activate va_gaze
+    export PYTHON_BIN="$CONDA_PREFIX/bin/python"
+- The Drive file must be accessible to gdown. Otherwise set sharing to
+  "Anyone with the link" or use permitted local TSV files in
+  data/external_english with DATA_ZIP_FILE_ID and DATA_ZIP_URL unset.
 
 # Or put permitted *.tsv files in data/external_english and use local mode
 bash install.sh
@@ -64,8 +78,8 @@ python setup_et_models.py --skip-install --skip-et1 --et2-checkpoint ./checkpoin
 python prepare_english_data.py \
   --output-dir data \
   --seed 42 \
-  --gdrive-file-id "<your-permitted-drive-file-id>" \
-  --gdrive-sha256 "<expected-sha256>" \
+  --gdrive-file-id "1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+  --gdrive-sha256 "5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
   --force
 
 Expected outputs:
@@ -81,11 +95,13 @@ python filter_datasets.py --input-dir data --output-dir data_no_iemocap --exclud
 4) TRAINING COMMANDS
 ==================================================
 DistilBERT setup and matrix runner:
-DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash scripts/setup_distilbert_env.sh
 
 Cloud NVIDIA GPU with Conda:
-DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash scripts/setup_distilbert_conda_cloud.sh
 
 # Primary baseline/postfix/GazeAdd comparison
@@ -158,6 +174,24 @@ python train_model.py xlmroberta-base mse+ccc \
   --gaze-aux-weight 0.1 \
   --gaze-alignment-weight 0.05
 
+G-2) Emotion-specific TRT-only predictor (separate option; auto-downloads from HF)
+python train_model.py distilbert mse \
+  --gaze-fusion postfix-concat \
+  --et-model-type emotion-trt \
+  --et-model-id skboy/emotion_trt_roberta_lr2e5_preval10 \
+  --features-used 0,0,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --batch-size 8 \
+  --maxlen 200 \
+  --optim adamw_torch \
+  --save-total-limit 1
+
+Full DistilBERT TRT-only condition group on the rented GPU:
+ET_MODEL_TYPE=emotion-trt \
+ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10 \
+CONDITIONS=trt REQUIRE_CUDA=1 \
+bash scripts/run_distilbert_experiments.sh
+
 Offline smoke matrix (baseline, configured gaze conditions, and all three postfix model selectors):
 PYTHONPATH=src python -m unittest discover -s tests -v
 bash scripts/run_smoke_gaze_strategies.sh
@@ -178,6 +212,7 @@ python train_model.py xlmroberta-large mse \
 Note:
 - With --use-gaze-concat, keep --maxlen <= 255.
 - --use-gaze-concat and --use-gaze-add are mutually exclusive.
+- emotion-trt predicts TRT only; use --features-used 0,0,0,1,0.
 - To train/evaluate on a filtered dataset folder, add: --data-dir data_no_iemocap
 
 ==================================================

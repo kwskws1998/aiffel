@@ -299,10 +299,21 @@ Run this once on a fresh machine after configuring a Google Drive bundle that yo
 are allowed to use:
 
 ```bash
-DATA_ZIP_FILE_ID=<your-permitted-drive-file-id> \
-DATA_ZIP_SHA256=<expected-sha256> \
+DATA_ZIP_FILE_ID=1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj \
+DATA_ZIP_SHA256=5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d \
 bash install.sh
 ```
+
+The command above uses the verified English TSV bundle previously used by this
+project. The checksum prevents a silently replaced Drive file from being used.
+For a different authorized bundle, replace both values. The Drive file must be
+accessible to `gdown` (normally **Anyone with the link**) or the download will
+fail. As a local alternative, unset `DATA_ZIP_FILE_ID` and `DATA_ZIP_URL`, then
+place the permitted TSV files under `data/external_english/`.
+
+Do not activate `.venv` inside the `va_gaze` Conda environment. `install.sh`
+rejects nested Conda/virtualenv sessions because `which python` and `gdown` can
+otherwise resolve to the wrong environment.
 
 What it does:
 - installs python dependencies from `requirements.txt` (includes `importlib_resources==6.5.2`)
@@ -347,8 +358,8 @@ to use:
 python3 prepare_english_data.py \
   --output-dir data \
   --seed 42 \
-  --gdrive-file-id <your-permitted-drive-file-id> \
-  --gdrive-sha256 <expected-sha256>
+  --gdrive-file-id 1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj \
+  --gdrive-sha256 5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d
 ```
 
 The zip may instead be specified with `--gdrive-zip-url`. There is deliberately no
@@ -644,11 +655,11 @@ it is not a scientific gaze predictor and should not be used for reported runs.
 Set up a dedicated virtual environment, ET2, and an authorized gdown dataset bundle:
 
 ```bash
-DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash scripts/setup_distilbert_env.sh
 ```
 
-Add `DATA_ZIP_SHA256="<expected-sha256>"` when you have an expected checksum.
 If the authorized TSV files are already in `data/external_english`, omit both Drive
 variables and run the setup script directly.
 
@@ -657,7 +668,8 @@ On a rented Linux NVIDIA GPU, create the isolated Conda environment with:
 ```bash
 git clone https://github.com/kwskws1998/aiffel.git
 cd aiffel
-DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
+DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
   bash scripts/setup_distilbert_conda_cloud.sh
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate va_gaze
@@ -748,6 +760,44 @@ python train_model.py xlmroberta-base mse+ccc \
 
 Set `EMOTION_ET_LOCAL_FILES_ONLY=1` when you want the wrapper to fail fast
 instead of trying to download from Hugging Face.
+
+### Emotion-specific TRT-only predictor
+
+The `skboy/emotion_trt_roberta_lr2e5_preval10` checkpoint is available as a
+separate predictor choice. It is not a replacement for `et2` or `emotion-et`.
+Unlike those five-feature predictors, this RoBERTa model outputs TRT only, so
+the feature flag must be `0,0,0,1,0`.
+
+The wrapper downloads the Hugging Face snapshot automatically on first use:
+
+```bash
+python train_model.py distilbert mse \
+  --et-model-type emotion-trt \
+  --et-model-id skboy/emotion_trt_roberta_lr2e5_preval10 \
+  --gaze-fusion postfix-concat \
+  --features-used 0,0,0,1,0 \
+  --fp-dropout 0.1,0.3 \
+  --maxlen 200
+```
+
+`emotion_trt`, `emotion-trt-roberta`, and `emotion_trt_roberta` are accepted
+aliases. A local Hugging Face snapshot directory can be supplied through
+`--et-model-id`. Set `EMOTION_TRT_ET_LOCAL_FILES_ONLY=1` to prohibit network
+downloads.
+
+For the DistilBERT matrix runner, use the dedicated TRT condition group:
+
+```bash
+ET_MODEL_TYPE=emotion-trt \
+ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10 \
+CONDITIONS=trt REQUIRE_CUDA=1 \
+bash scripts/run_distilbert_experiments.sh
+```
+
+This runs the baseline plus TRT-only postfix concat, GazeAdd, gaze summary,
+conditioned pooling, CLS attention bias, cross-attention, auxiliary-only, and
+alignment-only conditions. Existing ET2 condition names and defaults remain
+unchanged.
 
 ### MECO ET predictor + PCA/GMM gaze variants
 
