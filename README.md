@@ -652,20 +652,21 @@ Add `DATA_ZIP_SHA256="<expected-sha256>"` when you have an expected checksum.
 If the authorized TSV files are already in `data/external_english`, omit both Drive
 variables and run the setup script directly.
 
-On a rented Linux GPU image that already includes CUDA-enabled PyTorch, preserve that
-torch build and install the remaining dependencies with:
+On a rented Linux NVIDIA GPU, create the isolated Conda environment with:
 
 ```bash
-git clone https://github.com/kwskws1998/aiffel.git multilingual_va_prediction
-cd multilingual_va_prediction
+git clone https://github.com/kwskws1998/aiffel.git
+cd aiffel
 DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
-  bash scripts/setup_distilbert_cloud.sh
-source .venv/bin/activate
+  bash scripts/setup_distilbert_conda_cloud.sh
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate va_gaze
 ```
 
-The cloud setup fails early if the base Python or venv cannot see CUDA. It deliberately
-removes the pinned `torch==2.2.2` line from the temporary installation requirements so
-the cloud image's working CUDA torch is not replaced.
+The cloud setup creates the `va_gaze` Conda environment, installs PyTorch with the
+Conda `pytorch` and `nvidia` channels, verifies CUDA, and installs the remaining
+requirements without reinstalling the `torch==2.2.2` line through pip. Override
+`CUDA_RUNTIME=11.8` when the rented image requires the CUDA 11.8 runtime.
 
 Run the primary baseline/postfix/GazeAdd comparison, the new gaze conditions, or the
 full matrix respectively:

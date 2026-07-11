@@ -13,14 +13,17 @@ IMPORTANT RULE
 - Disk: at least 40 GB free recommended
 
 ==================================================
-1) CLONE + VENV
+1) CLONE
 ==================================================
-git clone https://github.com/kwskws1998/aiffel.git multilingual_va_prediction
-cd multilingual_va_prediction
+git clone https://github.com/kwskws1998/aiffel.git
+cd aiffel
 
 python3 -m venv .venv
 source .venv/bin/activate
 python -V
+
+The venv commands above are for local use. On a rented GPU, skip them and use
+scripts/setup_distilbert_conda_cloud.sh in section 4.
 
 ==================================================
 2) ONE-SHOT INSTALL (recommended)
@@ -81,9 +84,9 @@ DistilBERT setup and matrix runner:
 DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
 bash scripts/setup_distilbert_env.sh
 
-Cloud GPU image with CUDA-enabled PyTorch already installed:
+Cloud NVIDIA GPU with Conda:
 DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
-bash scripts/setup_distilbert_cloud.sh
+bash scripts/setup_distilbert_conda_cloud.sh
 
 # Primary baseline/postfix/GazeAdd comparison
 bash scripts/run_distilbert_experiments.sh
