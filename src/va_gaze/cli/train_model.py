@@ -27,6 +27,10 @@ ET_MODEL_CHOICES = [
 GAZE_TRANSFORM_CHOICES = ["raw", "pca", "gmm"]
 GAZE_FUSION_CHOICES = [
     "concat",
+    "postfix-concat",
+    "concat-postfix",
+    "prefix-concat",
+    "concat-prefix",
     "add",
     "gmm-adapter",
     "summary",
@@ -38,11 +42,20 @@ GAZE_FUSION_CHOICES = [
     "cross-attention",
 ]
 GAZE_FUSION_ALIASES = {
+    "concat": "postfix-concat",
+    "concat-postfix": "postfix-concat",
+    "concat-prefix": "prefix-concat",
     "pooling": "conditioned-pooling",
     "cls-attention-bias": "postencoder-cls-attention-bias",
     "attention-bias": "postencoder-cls-attention-bias",
 }
-LEGACY_GAZE_FUSIONS = {"concat", "add", "gmm-adapter", "summary"}
+OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS = {
+    "postfix-concat",
+    "prefix-concat",
+    "add",
+    "gmm-adapter",
+    "summary",
+}
 MODEL_HIDDEN_SIZES = {
     "distilbert": 768,
     "xlmroberta-base": 768,
@@ -265,7 +278,7 @@ def _validate_args(parser, args):
     resolved_fusion = args.gaze_fusion
     if resolved_fusion is None:
         if args.use_gaze_concat:
-            resolved_fusion = "concat"
+            resolved_fusion = "postfix-concat"
         elif args.use_gaze_add:
             resolved_fusion = "add"
     resolved_fusion = GAZE_FUSION_ALIASES.get(resolved_fusion, resolved_fusion)
@@ -275,16 +288,11 @@ def _validate_args(parser, args):
         or has_training_objective
     )
 
-    if resolved_fusion in LEGACY_GAZE_FUSIONS and has_training_objective:
+    if resolved_fusion in OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS and has_training_objective:
         parser.error(
             "--gaze-aux-weight/--gaze-alignment-weight can be used alone or with "
-            "post-encoder gaze fusion, but not with legacy concat/add/summary/gmm-adapter."
-        )
-
-    if resolved_fusion in LEGACY_GAZE_FUSIONS and args.et_model_type == "heuristic":
-        parser.error(
-            "--et-model-type heuristic is smoke-only and is not supported by legacy "
-            "concat/add/summary/gmm-adapter fusion."
+            "post-encoder gaze fusion, but cannot be combined with "
+            "postfix-concat/prefix-concat/add/summary/gmm-adapter."
         )
 
     if (
@@ -303,7 +311,7 @@ def _validate_args(parser, args):
             "by gaze_num_heads."
         )
 
-    if resolved_fusion == "concat" and args.maxlen > 255:
+    if resolved_fusion in ("postfix-concat", "prefix-concat") and args.maxlen > 255:
         parser.error(
             "When gaze concat is enabled, maxlen must be <= 255 to avoid positional limit overflow."
         )

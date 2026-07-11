@@ -40,7 +40,18 @@ LOSS_TO_TRAINER = {
     "hetero": CustomTrainerHeteroscedastic,
 }
 
-LEGACY_GAZE_FUSIONS = {"concat", "add", "gmm-adapter", "summary"}
+CONCAT_FUSION_ALIASES = {
+    "concat": "postfix-concat",
+    "concat-postfix": "postfix-concat",
+    "concat-prefix": "prefix-concat",
+}
+OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS = {
+    "postfix-concat",
+    "prefix-concat",
+    "add",
+    "gmm-adapter",
+    "summary",
+}
 
 
 def _select_batch_size(model_name, params):
@@ -57,11 +68,12 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
     gaze_fusion = gaze_config.get("gaze_fusion")
     if not gaze_fusion:
         if bool(gaze_config.get("use_gaze_concat", False)):
-            gaze_fusion = "concat"
+            gaze_fusion = "postfix-concat"
         elif bool(gaze_config.get("use_gaze_add", False)):
             gaze_fusion = "add"
         else:
             gaze_fusion = "none"
+    gaze_fusion = CONCAT_FUSION_ALIASES.get(gaze_fusion, gaze_fusion)
 
     shared_gaze_kwargs = {
         "et2_checkpoint_path": gaze_config.get("et2_checkpoint_path"),
@@ -82,21 +94,14 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
     normalized_advanced_fusion = normalize_advanced_fusion(gaze_fusion)
     if (
         gaze_fusion != "none"
-        and gaze_fusion not in LEGACY_GAZE_FUSIONS
+        and gaze_fusion not in OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS
         and normalized_advanced_fusion not in CANONICAL_ADVANCED_GAZE_FUSIONS
     ):
         raise ValueError(f"Unknown gaze fusion strategy: {gaze_fusion}")
-    if gaze_fusion in LEGACY_GAZE_FUSIONS and has_training_objective:
+    if gaze_fusion in OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS and has_training_objective:
         raise ValueError(
-            "Training-only gaze objectives cannot be combined with legacy "
-            "concat/add/summary/gmm-adapter fusion."
-        )
-    if (
-        gaze_fusion in LEGACY_GAZE_FUSIONS
-        and shared_gaze_kwargs["et_model_type"] in ("heuristic", "smoke")
-    ):
-        raise ValueError(
-            "The heuristic ET backend is smoke-only and unsupported by legacy gaze fusion."
+            "Training-only gaze objectives cannot be combined with "
+            "postfix-concat/prefix-concat/add/summary/gmm-adapter fusion."
         )
 
     if (
@@ -133,10 +138,18 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
             **shared_gaze_kwargs,
         )
 
-    if gaze_fusion == "concat":
+    if gaze_fusion == "postfix-concat":
         return GazeConcatForSequenceRegression(
             checkpoint=checkpoint,
             tokenizer=tokenizer,
+            concat_order="postfix",
+            **shared_gaze_kwargs,
+        )
+    if gaze_fusion == "prefix-concat":
+        return GazeConcatForSequenceRegression(
+            checkpoint=checkpoint,
+            tokenizer=tokenizer,
+            concat_order="prefix",
             **shared_gaze_kwargs,
         )
     if gaze_fusion == "add":

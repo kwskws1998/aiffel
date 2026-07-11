@@ -84,7 +84,7 @@ python train_model.py xlmroberta-large mse \
   --optim adamw_torch \
   --save-total-limit 1
 
-B) GazeConcat with ET2 (all 5 features)
+B) Postfix GazeConcat with ET2 (all 5 features; CLS remains position 0)
 python train_model.py xlmroberta-large mse \
   --use-gaze-concat \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
@@ -95,7 +95,7 @@ python train_model.py xlmroberta-large mse \
   --optim adamw_torch \
   --save-total-limit 1
 
-C) GazeConcat with fcomb2.2 (FFD+TRT)
+C) Postfix GazeConcat with fcomb2.2 (FFD+TRT)
 python train_model.py xlmroberta-large mse \
   --use-gaze-concat \
   --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
@@ -135,9 +135,11 @@ python train_model.py xlmroberta-base mse+ccc \
   --gaze-aux-weight 0.1 \
   --gaze-alignment-weight 0.05
 
-Offline smoke matrix (five new conditions, both folds):
+Offline smoke matrix (baseline, configured gaze conditions, and all three postfix model selectors):
 PYTHONPATH=src python -m unittest discover -s tests -v
 bash scripts/run_smoke_gaze_strategies.sh
+bash scripts/run_smoke_postfix_concat_backbones.sh
+MODEL_NAME=all SMOKE_ROOT=artifacts/gaze_all_backbone_smoke bash scripts/run_smoke_gaze_strategies.sh
 
 H) GazeAdd with fcomb2.2 (FFD+TRT)
 python train_model.py xlmroberta-large mse \

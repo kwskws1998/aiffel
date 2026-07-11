@@ -31,17 +31,49 @@ class TrainCliValidationTest(unittest.TestCase):
         self.assertIn(message, stderr.getvalue())
 
     def test_legacy_fusion_rejects_training_objectives(self):
-        for fusion in ("concat", "add", "summary", "gmm-adapter"):
+        for fusion in (
+            "postfix-concat",
+            "prefix-concat",
+            "add",
+            "summary",
+            "gmm-adapter",
+        ):
             with self.subTest(fusion=fusion):
                 self.assert_cli_error(
                     ["--gaze-fusion", fusion, "--gaze-aux-weight", "0.1"],
-                    "not with legacy concat/add/summary/gmm-adapter",
+                    "cannot be combined with postfix-concat/prefix-concat/add/summary/gmm-adapter",
                 )
 
-    def test_heuristic_backend_rejects_legacy_fusion(self):
+    def test_concat_aliases_default_to_postfix_and_prefix_is_explicit(self):
+        for arguments in (
+            ["--gaze-fusion", "concat"],
+            ["--gaze-fusion", "concat-postfix"],
+            ["--use-gaze-concat"],
+        ):
+            with self.subTest(arguments=arguments):
+                args = parse_and_validate(["xlmroberta-base", "mse", *arguments])
+                self.assertEqual(args.gaze_fusion, "postfix-concat")
+
+        args = parse_and_validate(
+            ["xlmroberta-base", "mse", "--gaze-fusion", "concat-prefix"]
+        )
+        self.assertEqual(args.gaze_fusion, "prefix-concat")
+
+    def test_concat_maxlen_boundary_accounts_for_doubled_sequence(self):
+        args = parse_and_validate(
+            [
+                "xlmroberta-base",
+                "mse",
+                "--gaze-fusion",
+                "postfix-concat",
+                "--maxlen",
+                "255",
+            ]
+        )
+        self.assertEqual(args.maxlen, 255)
         self.assert_cli_error(
-            ["--gaze-fusion", "concat", "--et-model-type", "heuristic"],
-            "not supported by legacy",
+            ["--gaze-fusion", "prefix-concat", "--maxlen", "256"],
+            "maxlen must be <= 255",
         )
 
     def test_cross_attention_validates_head_divisibility(self):
@@ -81,7 +113,10 @@ class TrainCliValidationTest(unittest.TestCase):
         self.assertEqual(args.report_to, [])
 
     def test_model_factory_also_rejects_silent_legacy_downgrade(self):
-        with self.assertRaisesRegex(ValueError, "cannot be combined with legacy"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot be combined with postfix-concat/prefix-concat",
+        ):
             _build_model(
                 "xlmroberta-base",
                 "unused",
@@ -92,6 +127,31 @@ class TrainCliValidationTest(unittest.TestCase):
                     "et_model_type": "et2",
                 },
             )
+
+    def test_model_factory_builds_postfix_by_default_and_prefix_explicitly(self):
+        captured = []
+
+        def fake_concat(**kwargs):
+            captured.append(kwargs["concat_order"])
+            return object()
+
+        with patch(
+            "va_gaze.train.fold_runner.GazeConcatForSequenceRegression",
+            side_effect=fake_concat,
+        ):
+            _build_model(
+                "xlmroberta-base",
+                "unused",
+                object(),
+                {"gaze_fusion": "concat", "et_model_type": "heuristic"},
+            )
+            _build_model(
+                "xlmroberta-base",
+                "unused",
+                object(),
+                {"gaze_fusion": "prefix-concat", "et_model_type": "heuristic"},
+            )
+        self.assertEqual(captured, ["postfix", "prefix"])
 
     def test_model_factory_rejects_unknown_fusion(self):
         with self.assertRaisesRegex(ValueError, "Unknown gaze fusion strategy"):

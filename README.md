@@ -275,6 +275,7 @@ src/va_gaze/
     et2_wrapper.py
     heuristic_et_wrapper.py
     gaze/
+      concat.py
       types.py
       provider.py
       fusion.py
@@ -416,7 +417,25 @@ It expects two arguments:
 
 ### GazeConcat / GazeAdd (ET model 2) for VA
 
-You can enable Seeing Eye to AI-style concatenation of ET features with:
+GazeConcat is postfix by default: the original text sequence, including CLS at
+position 0, is followed by the projected gaze sequence.
+
+```text
+[CLS, TEXT..., SEP] + [EYE_START, GAZE..., EYE_END] + [FUSED_PAD...]
+```
+
+This keeps the original CLS token at fused index 0 and leaves the original text
+positions unchanged. Since DistilBERT and XLM-R use bidirectional self-attention,
+the CLS representation can still attend to valid gaze tokens in the postfix block.
+The legacy prefix ablation is instead
+`[EYE_START, GAZE..., EYE_END] + [CLS, TEXT..., SEP] + [FUSED_PAD...]` and moves
+CLS to `valid_text_length + 2`. Each sample's original collator padding is removed
+before composition and added back only at the end of the fused sequence, so its gaze
+positions do not depend on the other samples in its batch. Both conditions retain one
+gaze slot for every valid text token, including masked special/subword slots; compact
+word-only gaze concatenation is a separate experiment.
+
+Enable postfix GazeConcat with the backward-compatible flag:
 
 ```bash
 python train_model.py xlmroberta-base mse+ccc \
@@ -437,7 +456,12 @@ python train_model.py xlmroberta-base mse+ccc \
   --gaze-add-scale 0.05
 ```
 
-- `--use-gaze-concat`: enables gaze-text concatenation.
+- `--use-gaze-concat`: enables postfix gaze concatenation.
+- `--gaze-fusion concat` is an alias for the canonical `postfix-concat` name.
+- `--gaze-fusion prefix-concat` retains the gaze-first layout only as an explicit
+  position-shift ablation; it is never selected by the default concat aliases.
+- Results produced by the former `gaze_concat` implementation are legacy prefix
+  results; they must not be relabeled or compared as newly run postfix results.
 - `--use-gaze-add`: enables gaze-text embedding addition.
 - `--et2-checkpoint`: path to your CMCL-RoBERTa ET2 checkpoint (`.pt` or `.safetensors`).
 - `--features-used`: feature flags in `nFix,FFD,GPT,TRT,fixProp` order.
@@ -543,7 +567,7 @@ Default VA hyperparameters (unchanged):
 - seed: `42`
 - maxlen: `200`
 
-Full CLI:
+Canonical CLI outline (aliases are described in the relevant sections above):
 
 ```bash
 python train_model.py <model> <loss> \
@@ -554,7 +578,7 @@ python train_model.py <model> <loss> \
   [--et-model-type et2|emotion-et|et-meco] \
   [--et-model-id <hf_repo_or_local_path>] \
   [--gaze-transform raw|pca|gmm] \
-  [--gaze-fusion concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention] \
+  [--gaze-fusion concat|postfix-concat|prefix-concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention] \
   [--gaze-artifact-dir <path>] \
   [--gmm-components <int>] \
   [--pca-components <int>] \
@@ -589,17 +613,31 @@ python train_model.py <model> <loss> \
 
 ### Reproducible offline smoke matrix
 
-The smoke harness creates a tiny random encoder/tokenizer and legal synthetic VA folds,
-then runs both folds for one optimizer step under all five new conditions:
+The smoke harness creates tiny random encoders/tokenizers and legal synthetic VA folds,
+then runs both folds for one optimizer step under ten conditions: baseline, GazeAdd,
+GazeSummary, three post-encoder fusions, two training-only objectives, postfix concat,
+and the explicit legacy prefix ablation:
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 bash scripts/run_smoke_gaze_strategies.sh
+bash scripts/run_smoke_postfix_concat_backbones.sh
 ```
 
-Smoke outputs and logs are written under `artifacts/gaze_strategy_smoke/`. The
-`heuristic` ET backend used by this script is deterministic and strictly for plumbing
-tests; it is not a scientific gaze predictor and should not be used for reported runs.
+The second script checks postfix concat under all three experiment selectors:
+`distilbert`, `xlmroberta-base`, and `xlmroberta-large`.
+For the exhaustive ten-condition by three-backbone matrix, run:
+
+```bash
+MODEL_NAME=all SMOKE_ROOT=artifacts/gaze_all_backbone_smoke \
+  bash scripts/run_smoke_gaze_strategies.sh
+```
+
+The default strategy matrix writes to `artifacts/gaze_strategy_smoke/`; the exhaustive
+matrix uses the `SMOKE_ROOT` shown above; the three-backbone
+postfix check writes to `artifacts/postfix_concat_backbone_smoke/`. The `heuristic`
+ET backend used by these scripts is deterministic and strictly for plumbing tests;
+it is not a scientific gaze predictor and should not be used for reported runs.
 
 Feature flag order is always: `nFix,FFD,GPT,TRT,fixProp`.
 Examples:

@@ -10,21 +10,27 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
-from transformers import PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaModel
+from transformers import (
+    DistilBertConfig,
+    DistilBertModel,
+    PreTrainedTokenizerFast,
+    XLMRobertaConfig,
+    XLMRobertaModel,
+)
 
 
 SPECIAL_TOKENS = ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "[MASK]"]
 FOLD_ROWS = {
     "full_dataset_fold1.csv": [
-        (0, "calm bright morning", "smoke", 0.78, 0.24),
+        (0, "calm morning", "smoke", 0.78, 0.24),
         (1, "terrible angry storm", "smoke", 0.08, 0.91),
-        (2, "quiet ordinary room", "smoke", 0.52, 0.30),
+        (2, "quiet ordinary simple room", "smoke", 0.52, 0.30),
         (3, "joyful exciting music", "smoke", 0.90, 0.83),
     ],
     "full_dataset_fold2.csv": [
-        (0, "sad lonely evening", "smoke", 0.15, 0.42),
+        (0, "sad evening", "smoke", 0.15, 0.42),
         (1, "pleasant gentle breeze", "smoke", 0.82, 0.28),
-        (2, "frightening sudden noise", "smoke", 0.12, 0.95),
+        (2, "frightening very sudden noise", "smoke", 0.12, 0.95),
         (3, "neutral simple sentence", "smoke", 0.50, 0.48),
     ],
 }
@@ -62,14 +68,14 @@ def create_tokenizer(model_dir):
     return len(vocabulary)
 
 
-def create_model(model_dir, vocab_size):
+def create_model(model_dir, vocab_size, hidden_size=32):
     torch.manual_seed(42)
     config = XLMRobertaConfig(
         vocab_size=vocab_size,
-        hidden_size=32,
+        hidden_size=hidden_size,
         num_hidden_layers=1,
         num_attention_heads=4,
-        intermediate_size=64,
+        intermediate_size=hidden_size * 2,
         max_position_embeddings=64,
         hidden_dropout_prob=0.0,
         attention_probs_dropout_prob=0.0,
@@ -78,6 +84,23 @@ def create_model(model_dir, vocab_size):
         eos_token_id=2,
     )
     XLMRobertaModel(config).save_pretrained(model_dir)
+
+
+def create_distilbert_model(model_dir, vocab_size):
+    torch.manual_seed(42)
+    config = DistilBertConfig(
+        vocab_size=vocab_size,
+        dim=32,
+        hidden_dim=64,
+        n_layers=1,
+        n_heads=4,
+        max_position_embeddings=64,
+        dropout=0.0,
+        attention_dropout=0.0,
+        seq_classif_dropout=0.0,
+        pad_token_id=0,
+    )
+    DistilBertModel(config).save_pretrained(model_dir)
 
 
 def create_data(data_dir):
@@ -101,13 +124,23 @@ def main():
 
     output_root = Path(args.output_root)
     model_dir = output_root / "tiny_encoder"
+    distilbert_dir = output_root / "tiny_distilbert"
+    xlm_roberta_large_dir = output_root / "tiny_xlm_roberta_large"
     data_dir = output_root / "data"
     model_dir.mkdir(parents=True, exist_ok=True)
+    distilbert_dir.mkdir(parents=True, exist_ok=True)
+    xlm_roberta_large_dir.mkdir(parents=True, exist_ok=True)
     vocab_size = create_tokenizer(model_dir)
+    create_tokenizer(distilbert_dir)
+    create_tokenizer(xlm_roberta_large_dir)
     create_model(model_dir, vocab_size)
+    create_distilbert_model(distilbert_dir, vocab_size)
+    create_model(xlm_roberta_large_dir, vocab_size, hidden_size=48)
     create_data(data_dir)
     manifest = {
         "model_dir": str(model_dir.resolve()),
+        "distilbert_model_dir": str(distilbert_dir.resolve()),
+        "xlm_roberta_large_model_dir": str(xlm_roberta_large_dir.resolve()),
         "data_dir": str(data_dir.resolve()),
         "fold_rows": {name: len(rows) for name, rows in FOLD_ROWS.items()},
     }

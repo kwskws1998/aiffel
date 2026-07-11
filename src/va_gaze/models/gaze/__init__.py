@@ -1,3 +1,8 @@
+from va_gaze.models.gaze.concat import (
+    GazeConcatInputs,
+    compose_gaze_concat_inputs,
+    normalize_concat_order,
+)
 from va_gaze.models.gaze.fusion import (
     GazeBiasedClsAttention,
     GazeConditionedPooling,
@@ -11,6 +16,7 @@ from va_gaze.models.gaze.types import GazeBatch
 
 __all__ = [
     "GazeBatch",
+    "GazeConcatInputs",
     "GazeBiasedClsAttention",
     "GazeConditionedPooling",
     "GazeCrossAttention",
@@ -19,4 +25,6 @@ __all__ = [
     "MaskedGazePrediction",
     "TokenInfoNCEAlignment",
     "build_gaze_fusion",
+    "compose_gaze_concat_inputs",
+    "normalize_concat_order",
 ]

@@ -11,6 +11,11 @@ from transformers.models.roberta.modeling_roberta import (
 )
 from transformers.models.xlm_roberta.configuration_xlm_roberta import XLMRobertaConfig
 
+from va_gaze.models.gaze.concat import (
+    POSTFIX_CONCAT,
+    compose_gaze_concat_inputs,
+    normalize_concat_order,
+)
 from va_gaze.models.gaze_transform import GazeFeatureTransformer
 
 
@@ -18,6 +23,7 @@ def _normalize_et_model_type(raw_value):
     aliases = {
         "emotion_et": "emotion-et",
         "et_meco": "et-meco",
+        "smoke": "heuristic",
     }
     return aliases.get(raw_value or "et2", raw_value or "et2")
 
@@ -176,6 +182,7 @@ class GazeConcatForSequenceRegression(nn.Module):
         pca_components=2,
         gmm_components=5,
         output_dim=2,
+        concat_order=POSTFIX_CONCAT,
     ):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(checkpoint)
@@ -184,6 +191,9 @@ class GazeConcatForSequenceRegression(nn.Module):
         self.hidden_size = self.config.hidden_size
         self.num_labels = output_dim
         self.output_dim = output_dim
+        self.concat_order = normalize_concat_order(concat_order)
+        if self.__class__ is GazeConcatForSequenceRegression:
+            self.config.gaze_concat_order = self.concat_order
         self.et_model_type = _normalize_et_model_type(et_model_type)
         self.gaze_transform_name = gaze_transform or "raw"
         self.feature_indices = None
@@ -245,13 +255,16 @@ class GazeConcatForSequenceRegression(nn.Module):
         features_used=None,
         load_fixation_model=True,
     ):
-        if self.et_model_type in ("et2", "legacy-et2"):
+        if self.et_model_type in ("et2", "legacy-et2", "heuristic"):
             flags = features_used or [1, 1, 1, 1, 1]
             self.feature_indices = [idx for idx, enabled in enumerate(flags) if int(enabled) == 1]
             if not self.feature_indices:
                 raise ValueError("features_used must enable at least one ET feature.")
             if load_fixation_model:
-                self.fp_model = self._load_et2_predictor(et2_checkpoint_path)
+                if self.et_model_type == "heuristic":
+                    self.fp_model = self._load_heuristic_predictor()
+                else:
+                    self.fp_model = self._load_et2_predictor(et2_checkpoint_path)
             return len(self.feature_indices)
 
         if self.et_model_type == "emotion-et":
@@ -289,6 +302,11 @@ class GazeConcatForSequenceRegression(nn.Module):
             for param in fp_model.model.parameters():
                 param.requires_grad = False
         return fp_model
+
+    def _load_heuristic_predictor(self):
+        from va_gaze.models.heuristic_et_wrapper import HeuristicFixationsPredictor
+
+        return HeuristicFixationsPredictor(modelTokenizer=self.tokenizer)
 
     def _load_emotion_et_predictor(self, et_model_id):
         try:
@@ -328,9 +346,14 @@ class GazeConcatForSequenceRegression(nn.Module):
 
     @staticmethod
     def _build_cache_key(token_ids_1d, attention_mask_1d):
-        valid_len = int(attention_mask_1d.sum().item())
+        mask = attention_mask_1d.to(dtype=torch.bool)
+        valid_len = int(mask.sum().item())
         if valid_len <= 0:
             return tuple(), valid_len
+        if not mask[:valid_len].all() or mask[valid_len:].any():
+            raise ValueError(
+                "GazeConcat requires a contiguous right-padded attention mask."
+            )
         return tuple(token_ids_1d[:valid_len].tolist()), valid_len
 
     def _predict_fixations_single(self, token_ids_1d, attention_mask_1d):
@@ -339,6 +362,11 @@ class GazeConcatForSequenceRegression(nn.Module):
         key, valid_len = self._build_cache_key(token_ids_1d, attention_mask_1d)
 
         if valid_len <= 0:
+            return (
+                torch.zeros(seq_len, self.selected_gaze_feature_dim, dtype=torch.float32, device=device),
+                torch.zeros(seq_len, dtype=attention_mask_1d.dtype, device=device),
+            )
+        if self.fp_model is None:
             return (
                 torch.zeros(seq_len, self.selected_gaze_feature_dim, dtype=torch.float32, device=device),
                 torch.zeros(seq_len, dtype=attention_mask_1d.dtype, device=device),
@@ -357,6 +385,11 @@ class GazeConcatForSequenceRegression(nn.Module):
             fixation_mask = fixation_mask.squeeze(0).long().cpu()
             if self.feature_indices is not None:
                 fixations = fixations[:, self.feature_indices]
+            finite_mask = torch.isfinite(fixations).all(dim=-1)
+            fixation_mask = (
+                fixation_mask.to(dtype=torch.bool) & finite_mask
+            ).to(dtype=fixation_mask.dtype)
+            fixations = torch.nan_to_num(fixations)
 
             if len(self.fixation_cache) >= self.max_fix_cache_size:
                 self.fixation_cache.popitem(last=False)
@@ -390,7 +423,30 @@ class GazeConcatForSequenceRegression(nn.Module):
         fixations = torch.stack(batch_fixations, dim=0)
         masks = torch.stack(batch_masks, dim=0)
         fixations = self.gaze_feature_transformer.transform_tensor(fixations, masks)
+        transformed_finite = torch.isfinite(fixations).all(dim=-1)
+        masks = masks * transformed_finite.to(dtype=masks.dtype)
+        fixations = torch.nan_to_num(fixations)
+        fixations = fixations.masked_fill(~masks.to(dtype=torch.bool).unsqueeze(-1), 0.0)
         return fixations, masks
+
+    def _validate_concat_length(self, sequence_length, position_ids=None):
+        max_positions = getattr(self.config, "max_position_embeddings", None)
+        if max_positions is None:
+            return
+        max_positions = int(max_positions)
+        usable_positions = max_positions
+        if self.config.model_type in ("roberta", "xlm-roberta"):
+            padding_idx = int(getattr(self.config, "pad_token_id", 0) or 0)
+            usable_positions = max_positions - padding_idx - 1
+        if int(sequence_length) > usable_positions:
+            raise ValueError(
+                "Gaze concat sequence length exceeds the encoder position limit: "
+                f"{sequence_length} > {usable_positions}. Reduce --maxlen."
+            )
+        if position_ids is not None and int(position_ids.max().item()) >= max_positions:
+            raise ValueError(
+                "Extended position_ids exceed the encoder position embedding table."
+            )
 
     def forward(
         self,
@@ -405,6 +461,11 @@ class GazeConcatForSequenceRegression(nn.Module):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        if inputs_embeds is not None:
+            raise ValueError(
+                "GazeConcat requires input_ids because gaze prediction is token-id based; "
+                "inputs_embeds is not supported."
+            )
         if input_ids is None:
             raise ValueError("input_ids cannot be None.")
         if attention_mask is None:
@@ -414,6 +475,10 @@ class GazeConcatForSequenceRegression(nn.Module):
         model_device = embed_layer.weight.device
         input_ids = input_ids.to(model_device)
         attention_mask = attention_mask.to(model_device)
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids.to(model_device)
+        if position_ids is not None:
+            position_ids = position_ids.to(model_device)
 
         text_embeddings = embed_layer(input_ids)
         fixations, fixation_attention = self._compute_fixations_batch(input_ids, attention_mask)
@@ -422,39 +487,51 @@ class GazeConcatForSequenceRegression(nn.Module):
 
         fixations_projected = self.fixations_embedding_projector(fixations)
         fixations_projected = self.norm_layer_fix(fixations_projected)
-
-        batch_size = input_ids.size(0)
-        eye_start_embed = self.eye_start.to(device=model_device, dtype=text_embeddings.dtype).view(1, 1, -1)
-        eye_end_embed = self.eye_end.to(device=model_device, dtype=text_embeddings.dtype).view(1, 1, -1)
-        eye_start_embed = eye_start_embed.expand(batch_size, -1, -1)
-        eye_end_embed = eye_end_embed.expand(batch_size, -1, -1)
-        separator_mask = torch.ones((batch_size, 1), dtype=attention_mask.dtype, device=model_device)
-
-        inputs_embeds = torch.cat(
-            (eye_start_embed, fixations_projected, eye_end_embed, text_embeddings), dim=1
+        fixations_projected = fixations_projected.masked_fill(
+            ~fixation_attention.to(dtype=torch.bool).unsqueeze(-1),
+            0.0,
         )
-        extended_attention_mask = torch.cat(
-            (separator_mask, fixation_attention, separator_mask, attention_mask), dim=1
+
+        concat_inputs = compose_gaze_concat_inputs(
+            text_embeddings=text_embeddings,
+            gaze_embeddings=fixations_projected,
+            text_attention_mask=attention_mask,
+            gaze_attention_mask=fixation_attention,
+            eye_start=self.eye_start,
+            eye_end=self.eye_end,
+            order=self.concat_order,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+        )
+        self._validate_concat_length(
+            concat_inputs.inputs_embeds.shape[1],
+            concat_inputs.position_ids,
         )
 
         encoder_kwargs = {
             "input_ids": None,
-            "attention_mask": extended_attention_mask,
-            "inputs_embeds": inputs_embeds,
+            "attention_mask": concat_inputs.attention_mask,
+            "inputs_embeds": concat_inputs.inputs_embeds,
             "output_attentions": output_attentions,
             "output_hidden_states": output_hidden_states,
             "return_dict": True,
         }
         if head_mask is not None:
             encoder_kwargs["head_mask"] = head_mask
-        if token_type_ids is not None and self.config.model_type != "distilbert":
-            encoder_kwargs["token_type_ids"] = token_type_ids
-        if position_ids is not None and self.config.model_type != "distilbert":
-            encoder_kwargs["position_ids"] = position_ids
+        if concat_inputs.token_type_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["token_type_ids"] = concat_inputs.token_type_ids
+        if concat_inputs.position_ids is not None and self.config.model_type != "distilbert":
+            encoder_kwargs["position_ids"] = concat_inputs.position_ids
 
         encoder_outputs = self.encoder(**encoder_kwargs)
-        cls_position = fixations_projected.shape[1] + 2
-        pooled_output = encoder_outputs.last_hidden_state[:, cls_position, :]
+        batch_indices = torch.arange(
+            encoder_outputs.last_hidden_state.shape[0],
+            device=encoder_outputs.last_hidden_state.device,
+        )
+        pooled_output = encoder_outputs.last_hidden_state[
+            batch_indices,
+            concat_inputs.cls_positions,
+        ]
         pooled_output = self.pre_classifier(pooled_output)
         pooled_output = torch.relu(pooled_output)
         pooled_output = self.dropout(pooled_output)
