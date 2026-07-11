@@ -10,6 +10,7 @@ usage() {
     "" \
     "Condition groups:" \
     "  CONDITIONS=core   baseline, postfix FFD+TRT, GazeAdd FFD+TRT" \
+    "  CONDITIONS=main   recommended ET2 matrix without legacy prefix" \
     "  CONDITIONS=new    baseline, postfix, summary, three post-encoder methods, two objectives" \
     "  CONDITIONS=trt    baseline and all non-legacy gaze strategies using TRT only" \
     "  CONDITIONS=all    every condition, including all-feature postfix and legacy prefix" \
@@ -25,7 +26,7 @@ usage() {
     "  DATA_DIR=data ET_MODEL_TYPE=et2 ET2_CHECKPOINT=./checkpoints/et_predictor2_seed123" \
     "  ET_MODEL_TYPE=emotion-trt ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10" \
     "  OUTPUT_ROOT=Preds/distilbert_matrix_<timestamp>" \
-    "  SAVE_STRATEGY=epoch SAVE_FINAL_MODEL=1 REQUIRE_CUDA=0 DRY_RUN=0"
+    "  SAVE_STRATEGY=epoch SAVE_FINAL_MODEL=1 SKIP_COMPLETED=0 REQUIRE_CUDA=0 DRY_RUN=0"
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -36,7 +37,11 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-if [[ -x .venv/bin/python ]]; then
+if [[ -n "${CONDA_PREFIX:-}" && -x "$CONDA_PREFIX/bin/python" ]]; then
+  DEFAULT_PYTHON="$CONDA_PREFIX/bin/python"
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+  DEFAULT_PYTHON="$VIRTUAL_ENV/bin/python"
+elif [[ -x .venv/bin/python ]]; then
   DEFAULT_PYTHON="$REPO_ROOT/.venv/bin/python"
 else
   DEFAULT_PYTHON="python"
@@ -61,6 +66,7 @@ FP_DROPOUT="${FP_DROPOUT:-0.1,0.3}"
 SAVE_STRATEGY="${SAVE_STRATEGY:-epoch}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-1}"
 SAVE_FINAL_MODEL="${SAVE_FINAL_MODEL:-1}"
+SKIP_COMPLETED="${SKIP_COMPLETED:-0}"
 CONDITIONS="${CONDITIONS:-core}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-Preds/distilbert_matrix_${RUN_TAG}}"
@@ -68,7 +74,13 @@ DISTILBERT_CHECKPOINT="${DISTILBERT_CHECKPOINT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 REQUIRE_CUDA="${REQUIRE_CUDA:-0}"
 
+if [[ "$SKIP_COMPLETED" != "0" && "$SKIP_COMPLETED" != "1" ]]; then
+  echo "SKIP_COMPLETED must be 0 or 1." >&2
+  exit 2
+fi
+
 CORE_CONDITIONS=(baseline postfix_ffd_trt gaze_add_ffd_trt)
+MAIN_CONDITIONS=(baseline postfix_all postfix_ffd_trt gaze_add_ffd_trt gaze_summary_ffd_trt conditioned_pooling cls_attention_bias cross_attention auxiliary_only alignment_only)
 NEW_CONDITIONS=(baseline postfix_ffd_trt gaze_summary_ffd_trt conditioned_pooling cls_attention_bias cross_attention auxiliary_only alignment_only)
 TRT_CONDITIONS=(baseline postfix_trt gaze_add_trt gaze_summary_trt conditioned_pooling_trt cls_attention_bias_trt cross_attention_trt auxiliary_only_trt alignment_only_trt)
 ALL_CONDITIONS=(baseline postfix_all postfix_ffd_trt postfix_trt gaze_add_ffd_trt gaze_add_trt gaze_summary_ffd_trt gaze_summary_trt conditioned_pooling conditioned_pooling_trt cls_attention_bias cls_attention_bias_trt cross_attention cross_attention_trt auxiliary_only auxiliary_only_trt alignment_only alignment_only_trt prefix_legacy)
@@ -76,6 +88,9 @@ ALL_CONDITIONS=(baseline postfix_all postfix_ffd_trt postfix_trt gaze_add_ffd_tr
 case "$CONDITIONS" in
   core)
     SELECTED_CONDITIONS=("${CORE_CONDITIONS[@]}")
+    ;;
+  main)
+    SELECTED_CONDITIONS=("${MAIN_CONDITIONS[@]}")
     ;;
   new)
     SELECTED_CONDITIONS=("${NEW_CONDITIONS[@]}")
@@ -211,6 +226,10 @@ run_condition() {
   fi
 
   if [[ -e "$result_dir" ]]; then
+    if [[ "$SKIP_COMPLETED" == "1" && -s "$result_dir/training_parameters.json" && -s "$result_dir/predictions_fold1.csv" && -s "$result_dir/predictions_fold2.csv" && -s "$result_dir/overall_metrics.json" ]]; then
+      echo "Skipping completed result: $result_dir"
+      return
+    fi
     echo "Refusing to overwrite existing result directory: $result_dir" >&2
     exit 2
   fi

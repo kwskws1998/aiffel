@@ -56,6 +56,20 @@ class InstallValidationTest(unittest.TestCase):
         self.assertIn("unset PYTHON_BIN VIRTUAL_ENV", result.stderr)
         self.assertNotIn("[1/3] Python dependencies", result.stdout)
 
+    def test_skip_deps_rejects_an_incomplete_environment(self):
+        result = self.run_install(
+            {
+                "PYTHON_BIN": "/usr/bin/false",
+                "DATA_ZIP_FILE_ID": "",
+                "DATA_ZIP_URL": "",
+                "CONDA_PREFIX": "",
+                "VIRTUAL_ENV": "",
+            }
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("core dependencies are missing", result.stderr)
+        self.assertIn("setup_distilbert_conda_cloud.sh", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

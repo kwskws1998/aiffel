@@ -104,6 +104,10 @@ DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
 DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash scripts/setup_distilbert_conda_cloud.sh
 
+Do not set SKIP_DEPS=1 yourself on a fresh Conda environment. The cloud script
+installs numpy, pandas, PyTorch, Transformers, gdown, and the remaining pinned
+requirements before calling install.sh.
+
 # Primary baseline/postfix/GazeAdd comparison
 bash scripts/run_distilbert_experiments.sh
 
@@ -115,6 +119,25 @@ CONDITIONS=all bash scripts/run_distilbert_experiments.sh
 
 # Refuse to start if the paid cloud GPU is not visible
 REQUIRE_CUDA=1 CONDITIONS=all bash scripts/run_distilbert_experiments.sh
+
+Recommended DistilBERT ET2 multi-seed main matrix (no legacy gaze-prefix):
+conda activate va_gaze
+export PYTHON_BIN="$CONDA_PREFIX/bin/python"
+SEEDS=42,123,2025 \
+CONDITIONS=main \
+ET_MODEL_TYPE=et2 \
+REQUIRE_CUDA=1 \
+SAVE_STRATEGY=epoch \
+SAVE_FINAL_MODEL=1 \
+bash scripts/run_distilbert_multiseed.sh
+
+Emotion-specific TRT-only multi-seed matrix:
+SEEDS=42,123,2025 \
+CONDITIONS=trt \
+ET_MODEL_TYPE=emotion-trt \
+ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10 \
+REQUIRE_CUDA=1 \
+bash scripts/run_distilbert_multiseed.sh
 
 A) Baseline (no gaze concat)
 python train_model.py xlmroberta-large mse \

@@ -675,6 +675,11 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate va_gaze
 ```
 
+If an old `.venv` is active, run `deactivate` first. Do not set `SKIP_DEPS=1`
+manually on a fresh Conda environment. The Conda bootstrap installs the complete
+requirements set first and only uses `SKIP_DEPS=1` internally when it delegates
+to `install.sh`.
+
 The cloud setup creates the `va_gaze` Conda environment, installs PyTorch with the
 Conda `pytorch` and `nvidia` channels, verifies CUDA, and installs the remaining
 requirements without reinstalling the `torch==2.2.2` line through pip. Override
@@ -694,6 +699,39 @@ The runner defaults to `mse`, seed `42`, batch size `8`, maximum text length `20
 ten epochs, and the real ET2 backend. Use `--help` to see condition names and environment
 overrides. `prefix_legacy` is included only in `CONDITIONS=all`; all ordinary concat
 conditions use postfix.
+
+For condition-by-condition multi-seed DistilBERT experiments, the recommended
+default is three downstream seeds (`42,123,2025`) and the `main` ET2 condition
+group. `main` excludes the legacy gaze-prefix condition:
+
+```bash
+conda activate va_gaze
+export PYTHON_BIN="$CONDA_PREFIX/bin/python"
+
+SEEDS=42,123,2025 \
+CONDITIONS=main \
+ET_MODEL_TYPE=et2 \
+REQUIRE_CUDA=1 \
+SAVE_STRATEGY=epoch \
+SAVE_FINAL_MODEL=1 \
+bash scripts/run_distilbert_multiseed.sh
+```
+
+The multi-seed runner uses one output root containing directories such as
+`postfix_ffd_trt_seed42`. Completed runs are skipped on resume by default. After
+all seeds finish, it writes `multiseed_runs.csv`, `multiseed_summary.csv`, and
+`multiseed_summary.json`; standard deviations are sample standard deviations.
+
+Use the TRT-only emotion predictor across the same three downstream seeds with:
+
+```bash
+SEEDS=42,123,2025 \
+CONDITIONS=trt \
+ET_MODEL_TYPE=emotion-trt \
+ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10 \
+REQUIRE_CUDA=1 \
+bash scripts/run_distilbert_multiseed.sh
+```
 
 Feature flag order is always: `nFix,FFD,GPT,TRT,fixProp`.
 Examples:

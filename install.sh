@@ -100,6 +100,17 @@ echo
 echo "[1/3] Python dependencies"
 if [[ "$SKIP_DEPS" == "1" ]]; then
   echo "  - skip (SKIP_DEPS=1)"
+  if ! "$PYTHON_BIN" -c 'import numpy, pandas, scipy, sklearn, torch, transformers, gdown, safetensors' >/dev/null 2>&1; then
+    cat >&2 <<EOF
+[error] SKIP_DEPS=1 was requested, but core dependencies are missing from:
+  $PYTHON_BIN
+
+Use the Conda cloud bootstrap instead of skipping dependencies:
+  unset SKIP_DEPS PYTHON_BIN
+  bash scripts/setup_distilbert_conda_cloud.sh
+EOF
+    exit 2
+  fi
 else
   "$PYTHON_BIN" -m pip install -U pip setuptools wheel
   "$PYTHON_BIN" -m pip install -r requirements.txt

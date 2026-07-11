@@ -29,6 +29,12 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  echo "A virtualenv is active: $VIRTUAL_ENV" >&2
+  echo "Run 'deactivate' before the Conda bootstrap." >&2
+  exit 2
+fi
+
 CONDA_ENV="${CONDA_ENV:-va_gaze}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 TORCH_VERSION="${TORCH_VERSION:-2.2.2}"
@@ -77,7 +83,7 @@ if [[ "$PRELOAD_MODELS" == "1" ]]; then
   "$PYTHON_BIN" -c 'from transformers import AutoModel,AutoTokenizer,RobertaModel,RobertaTokenizer; AutoTokenizer.from_pretrained("distilbert-base-multilingual-cased"); AutoModel.from_pretrained("distilbert-base-multilingual-cased"); RobertaTokenizer.from_pretrained("roberta-base", add_prefix_space=True); RobertaModel.from_pretrained("roberta-base")'
 fi
 
-"$PYTHON_BIN" -c 'import torch,transformers,gdown; assert torch.cuda.is_available(); print("torch", torch.__version__); print("torch_cuda", torch.version.cuda); print("transformers", transformers.__version__); print("gpu", torch.cuda.get_device_name(0))'
+"$PYTHON_BIN" -c 'import numpy,pandas,scipy,sklearn,torch,transformers,gdown,safetensors; assert torch.cuda.is_available(); print("python_deps=ok"); print("torch", torch.__version__); print("torch_cuda", torch.version.cuda); print("transformers", transformers.__version__); print("gpu", torch.cuda.get_device_name(0))'
 
 CONDA_BASE="$(conda info --base)"
 echo "Conda cloud environment ready."

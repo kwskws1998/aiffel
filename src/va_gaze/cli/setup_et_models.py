@@ -155,23 +155,23 @@ def resolve_or_download_et_model2(
     return abs_path
 
 
-def verify_setup():
+def verify_setup(verify_et1=False):
     print("\n[4/4] 설치 검증 중...")
 
-    # eyetrackpy model 1
-    try:
-        from eyetrackpy.data_generator.fixations_predictor_trained_1.fixations_predictor_model_1 import FixationsPredictor_1
-        print("  ✓ FixationsPredictor_1 import OK")
-    except Exception as e:
-        print(f"  ✗ FixationsPredictor_1 import 실패: {e}")
+    if verify_et1:
+        try:
+            from eyetrackpy.data_generator.fixations_predictor_trained_1.fixations_predictor_model_1 import FixationsPredictor_1
+            print("  ✓ FixationsPredictor_1 import OK")
+        except Exception as exc:
+            raise RuntimeError(f"FixationsPredictor_1 import 실패: {exc}") from exc
+    else:
+        print("  - FixationsPredictor_1 검증 건너뜀 (--skip-et1)")
 
-    # et2_wrapper
     try:
         from va_gaze.models.et2_wrapper import FixationsPredictor_2
         print("  ✓ FixationsPredictor_2 (wrapper) import OK")
-    except Exception as e:
-        print(f"  ✗ FixationsPredictor_2 wrapper import 실패: {e}")
-        print("    et2_wrapper.py가 같은 디렉토리에 있는지 확인하세요.")
+    except Exception as exc:
+        raise RuntimeError(f"FixationsPredictor_2 wrapper import 실패: {exc}") from exc
 
 
 def main():
@@ -225,7 +225,7 @@ def main():
         hf_repo_id=args.et2_hf_repo,
         hf_filename=args.et2_hf_filename,
     )
-    verify_setup()
+    verify_setup(verify_et1=not args.skip_et1)
 
     print("\n✓ 셋업 완료. 이제 train을 실행하세요.")
     print("  예시: python train_model.py xlmroberta-large mse \\")
