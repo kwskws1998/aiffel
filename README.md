@@ -639,6 +639,49 @@ postfix check writes to `artifacts/postfix_concat_backbone_smoke/`. The `heurist
 ET backend used by these scripts is deterministic and strictly for plumbing tests;
 it is not a scientific gaze predictor and should not be used for reported runs.
 
+### DistilBERT environment and experiment runner
+
+Set up a dedicated virtual environment, ET2, and an authorized gdown dataset bundle:
+
+```bash
+DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+bash scripts/setup_distilbert_env.sh
+```
+
+Add `DATA_ZIP_SHA256="<expected-sha256>"` when you have an expected checksum.
+If the authorized TSV files are already in `data/external_english`, omit both Drive
+variables and run the setup script directly.
+
+On a rented Linux GPU image that already includes CUDA-enabled PyTorch, preserve that
+torch build and install the remaining dependencies with:
+
+```bash
+git clone https://github.com/kwskws1998/aiffel.git multilingual_va_prediction
+cd multilingual_va_prediction
+DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+  bash scripts/setup_distilbert_cloud.sh
+source .venv/bin/activate
+```
+
+The cloud setup fails early if the base Python or venv cannot see CUDA. It deliberately
+removes the pinned `torch==2.2.2` line from the temporary installation requirements so
+the cloud image's working CUDA torch is not replaced.
+
+Run the primary baseline/postfix/GazeAdd comparison, the new gaze conditions, or the
+full matrix respectively:
+
+```bash
+bash scripts/run_distilbert_experiments.sh
+CONDITIONS=new bash scripts/run_distilbert_experiments.sh
+CONDITIONS=all bash scripts/run_distilbert_experiments.sh
+REQUIRE_CUDA=1 CONDITIONS=all bash scripts/run_distilbert_experiments.sh
+```
+
+The runner defaults to `mse`, seed `42`, batch size `8`, maximum text length `200`,
+ten epochs, and the real ET2 backend. Use `--help` to see condition names and environment
+overrides. `prefix_legacy` is included only in `CONDITIONS=all`; all ordinary concat
+conditions use postfix.
+
 Feature flag order is always: `nFix,FFD,GPT,TRT,fixProp`.
 Examples:
 - all features: `1,1,1,1,1`

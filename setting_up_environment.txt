@@ -15,7 +15,7 @@ IMPORTANT RULE
 ==================================================
 1) CLONE + VENV
 ==================================================
-git clone https://github.com/kwskws1998/multilingual_va_prediction.git
+git clone https://github.com/kwskws1998/aiffel.git multilingual_va_prediction
 cd multilingual_va_prediction
 
 python3 -m venv .venv
@@ -77,6 +77,26 @@ python filter_datasets.py --input-dir data --output-dir data_no_iemocap --exclud
 ==================================================
 4) TRAINING COMMANDS
 ==================================================
+DistilBERT setup and matrix runner:
+DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+bash scripts/setup_distilbert_env.sh
+
+Cloud GPU image with CUDA-enabled PyTorch already installed:
+DATA_ZIP_FILE_ID="<your-permitted-drive-file-id>" \
+bash scripts/setup_distilbert_cloud.sh
+
+# Primary baseline/postfix/GazeAdd comparison
+bash scripts/run_distilbert_experiments.sh
+
+# Baseline plus the newly implemented gaze conditions
+CONDITIONS=new bash scripts/run_distilbert_experiments.sh
+
+# Full DistilBERT condition matrix, including explicit legacy prefix
+CONDITIONS=all bash scripts/run_distilbert_experiments.sh
+
+# Refuse to start if the paid cloud GPU is not visible
+REQUIRE_CUDA=1 CONDITIONS=all bash scripts/run_distilbert_experiments.sh
+
 A) Baseline (no gaze concat)
 python train_model.py xlmroberta-large mse \
   --batch-size 8 \
