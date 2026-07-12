@@ -44,6 +44,7 @@ GAZE_FUSION_CHOICES = [
     "cls-attention-bias",
     "attention-bias",
     "cross-attention",
+    "gmm-dual-gate-pooling",
 ]
 GAZE_FUSION_ALIASES = {
     "concat": "postfix-concat",
@@ -145,6 +146,8 @@ def _build_parser():
     parser.add_argument("--gaze-fusion", choices=GAZE_FUSION_CHOICES, default=None)
     parser.add_argument("--gaze-artifact-dir", default=None)
     parser.add_argument("--gmm-components", type=int, default=5)
+    parser.add_argument("--gmm-temperature", type=float, default=1.0)
+    parser.add_argument("--gmm-nll-weight", type=float, default=0.01)
     parser.add_argument("--pca-components", type=int, default=2)
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
@@ -256,6 +259,10 @@ def _validate_args(parser, args):
         parser.error("gaze_fusion_dropout must be in [0, 1).")
     if args.gaze_alignment_temperature <= 0:
         parser.error("gaze_alignment_temperature must be > 0.")
+    if args.gmm_temperature <= 0:
+        parser.error("gmm_temperature must be > 0.")
+    if args.gmm_nll_weight < 0:
+        parser.error("gmm_nll_weight must be >= 0.")
     if args.gaze_num_layers < 0:
         parser.error("gaze_num_layers must be >= 0.")
 
@@ -345,6 +352,30 @@ def _validate_args(parser, args):
         if args.gaze_transform not in ("raw", "gmm"):
             parser.error("--gaze-fusion gmm-adapter uses GMM posterior and cannot use PCA.")
         args.gaze_transform = "gmm"
+    if resolved_fusion == "gmm-dual-gate-pooling":
+        if args.et_model_type not in ("et2", "emotion-et", "heuristic"):
+            parser.error(
+                "--gaze-fusion gmm-dual-gate-pooling requires a five-feature "
+                "--et-model-type et2 or emotion-et predictor (heuristic is smoke-only)."
+            )
+        if features_used != [1, 1, 1, 1, 1]:
+            parser.error(
+                "--gaze-fusion gmm-dual-gate-pooling requires "
+                "--features-used 1,1,1,1,1."
+            )
+        if args.gaze_transform != "raw":
+            parser.error(
+                "--gaze-fusion gmm-dual-gate-pooling learns its GMM internally; "
+                "use --gaze-transform raw."
+            )
+        if args.loss == "hetero":
+            parser.error(
+                "--gaze-fusion gmm-dual-gate-pooling does not currently support hetero loss."
+            )
+        if args.gmm_components < 2:
+            parser.error(
+                "--gaze-fusion gmm-dual-gate-pooling requires --gmm-components >= 2."
+            )
     args.gaze_fusion = resolved_fusion
 
     _validate_positive_int("gmm_components", args.gmm_components)
@@ -405,6 +436,8 @@ def main():
         "gaze_fusion": args.gaze_fusion,
         "gaze_artifact_dir": args.gaze_artifact_dir,
         "gmm_components": args.gmm_components,
+        "gmm_temperature": args.gmm_temperature,
+        "gmm_nll_weight": args.gmm_nll_weight,
         "pca_components": args.pca_components,
         "features_used": features_used,
         "fp_dropout": fp_dropout,
@@ -462,6 +495,8 @@ def main():
         "gaze_fusion": gaze_config["gaze_fusion"],
         "gaze_artifact_dir": gaze_config["gaze_artifact_dir"],
         "gmm_components": gaze_config["gmm_components"],
+        "gmm_temperature": gaze_config["gmm_temperature"],
+        "gmm_nll_weight": gaze_config["gmm_nll_weight"],
         "pca_components": gaze_config["pca_components"],
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],

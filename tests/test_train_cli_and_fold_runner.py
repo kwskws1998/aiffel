@@ -106,6 +106,41 @@ class TrainCliValidationTest(unittest.TestCase):
         )
         self.assertEqual(args.gaze_fusion, "postencoder-cls-attention-bias")
 
+    def test_gmm_dual_gate_requires_et2_all_features_and_multiple_components(self):
+        args = parse_and_validate(
+            [
+                "xlmroberta-base",
+                "mse",
+                "--gaze-fusion",
+                "gmm-dual-gate-pooling",
+                "--et-model-type",
+                "et2",
+                "--features-used",
+                "1,1,1,1,1",
+                "--gmm-components",
+                "5",
+            ]
+        )
+        self.assertEqual(args.gaze_fusion, "gmm-dual-gate-pooling")
+        self.assert_cli_error(
+            [
+                "--gaze-fusion",
+                "gmm-dual-gate-pooling",
+                "--features-used",
+                "0,0,0,1,0",
+            ],
+            "requires --features-used 1,1,1,1,1",
+        )
+        self.assert_cli_error(
+            [
+                "--gaze-fusion",
+                "gmm-dual-gate-pooling",
+                "--gmm-components",
+                "1",
+            ],
+            "requires --gmm-components >= 2",
+        )
+
     def test_report_to_none_becomes_empty_reporter_list(self):
         args = parse_and_validate(
             ["xlmroberta-base", "mse", "--report-to", "none"]

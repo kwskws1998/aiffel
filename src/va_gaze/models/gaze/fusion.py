@@ -214,6 +214,193 @@ class GazeCrossAttention(BaseGazeFusion):
         return self.fusion(cls_state, context, gaze_batch.has_gaze)
 
 
+class GmmDualGatePooling(BaseGazeFusion):
+    """Learn gaze regimes and task-specific feature gates after text encoding."""
+
+    def __init__(
+        self,
+        hidden_size,
+        gaze_dim,
+        gaze_hidden_size=128,
+        gmm_components=5,
+        gmm_temperature=1.0,
+        gmm_nll_weight=0.01,
+        gate_init=-4.0,
+        dropout=0.1,
+    ):
+        super().__init__()
+        if int(gaze_dim) != 5:
+            raise ValueError(
+                "gmm-dual-gate-pooling requires all five ET features "
+                "(nFix, FFD, GPT, TRT, fixProp)."
+            )
+        if int(gmm_components) < 2:
+            raise ValueError("gmm_components must be >= 2 for GMM dual-gate pooling.")
+        if float(gmm_temperature) <= 0:
+            raise ValueError("gmm_temperature must be > 0.")
+        if float(gmm_nll_weight) < 0:
+            raise ValueError("gmm_nll_weight must be >= 0.")
+
+        self.hidden_size = int(hidden_size)
+        self.gaze_dim = int(gaze_dim)
+        self.gaze_hidden_size = int(gaze_hidden_size)
+        self.gmm_components = int(gmm_components)
+        self.gmm_temperature = float(gmm_temperature)
+        self.gmm_nll_weight = float(gmm_nll_weight)
+
+        self.gmm_input_norm = nn.LayerNorm(
+            self.gaze_dim,
+            elementwise_affine=False,
+        )
+        self.gmm_means = nn.Parameter(torch.empty(self.gmm_components, self.gaze_dim))
+        self.gmm_log_vars = nn.Parameter(torch.zeros(self.gmm_components, self.gaze_dim))
+        self.gmm_logits = nn.Parameter(torch.zeros(self.gmm_components))
+        nn.init.normal_(self.gmm_means, mean=0.0, std=0.5)
+
+        self.feature_experts = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(1, self.gaze_hidden_size),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(self.gaze_hidden_size, self.hidden_size),
+                )
+                for _ in range(self.gaze_dim)
+            ]
+        )
+        gate_input_size = (
+            self.hidden_size + self.gaze_dim + self.gmm_components + 1
+        )
+        self.feature_gates = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(gate_input_size, self.gaze_hidden_size),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(self.gaze_hidden_size, self.gaze_dim),
+                )
+                for _ in range(2)
+            ]
+        )
+        self.text_scorers = nn.ModuleList(
+            [nn.Linear(self.hidden_size, self.gaze_hidden_size, bias=False) for _ in range(2)]
+        )
+        self.gaze_scorers = nn.ModuleList(
+            [nn.Linear(self.hidden_size, self.gaze_hidden_size, bias=False) for _ in range(2)]
+        )
+        self.pooling_scores = nn.ModuleList(
+            [nn.Linear(self.gaze_hidden_size, 1, bias=False) for _ in range(2)]
+        )
+        self.residual_fusions = nn.ModuleList(
+            [
+                GatedResidualFusion(
+                    hidden_size=self.hidden_size,
+                    gate_init=gate_init,
+                    dropout=dropout,
+                )
+                for _ in range(2)
+            ]
+        )
+
+    @staticmethod
+    def _transform_features(features):
+        return torch.sign(features) * torch.log1p(features.abs())
+
+    def _gmm_posterior(self, normalized_features, valid):
+        features = normalized_features.unsqueeze(-2)
+        log_vars = self.gmm_log_vars.clamp(min=-4.0, max=4.0)
+        inverse_vars = torch.exp(-log_vars)
+        squared = torch.square(features - self.gmm_means) * inverse_vars
+        log_prob = -0.5 * (
+            squared + log_vars + math.log(2.0 * math.pi)
+        ).sum(dim=-1)
+        log_joint = torch.log_softmax(self.gmm_logits, dim=-1) + log_prob
+        responsibilities = torch.softmax(
+            log_joint / self.gmm_temperature,
+            dim=-1,
+        )
+        responsibilities = responsibilities * valid.unsqueeze(-1).to(
+            dtype=responsibilities.dtype
+        )
+
+        entropy = -(
+            responsibilities
+            * responsibilities.clamp_min(torch.finfo(responsibilities.dtype).eps).log()
+        ).sum(dim=-1)
+        confidence = 1.0 - entropy / math.log(self.gmm_components)
+        confidence = confidence.clamp(min=0.0, max=1.0)
+        confidence = confidence * valid.to(dtype=confidence.dtype)
+
+        if valid.any():
+            nll = -torch.logsumexp(log_joint[valid], dim=-1).mean() / self.gaze_dim
+        else:
+            nll = log_joint.sum() * 0.0
+        return responsibilities, confidence, self.gmm_nll_weight * nll
+
+    def forward(self, cls_state, text_states, gaze_batch):
+        valid = gaze_batch.valid_mask
+        transformed = self._transform_features(gaze_batch.features)
+        normalized = self.gmm_input_norm(transformed)
+        normalized = normalized * valid.unsqueeze(-1).to(dtype=normalized.dtype)
+        responsibilities, confidence, gmm_loss = self._gmm_posterior(
+            normalized,
+            valid,
+        )
+
+        expert_outputs = torch.stack(
+            [
+                expert(transformed[..., feature_index : feature_index + 1])
+                for feature_index, expert in enumerate(self.feature_experts)
+            ],
+            dim=2,
+        )
+        gate_inputs = torch.cat(
+            (
+                text_states,
+                normalized,
+                responsibilities,
+                confidence.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+
+        task_representations = []
+        for task_index in range(2):
+            feature_weights = torch.softmax(
+                self.feature_gates[task_index](gate_inputs),
+                dim=-1,
+            )
+            gaze_context = torch.sum(
+                feature_weights.unsqueeze(-1) * expert_outputs,
+                dim=2,
+            )
+            gaze_context = gaze_context * confidence.unsqueeze(-1)
+            gaze_context = gaze_context * valid.unsqueeze(-1).to(
+                dtype=gaze_context.dtype
+            )
+
+            scores = self.pooling_scores[task_index](
+                torch.tanh(
+                    self.text_scorers[task_index](text_states)
+                    + self.gaze_scorers[task_index](gaze_context)
+                )
+            ).squeeze(-1)
+            token_weights = _masked_softmax(scores, valid, dim=-1)
+            pooled_text = torch.sum(
+                token_weights.unsqueeze(-1) * text_states,
+                dim=1,
+            )
+            task_representations.append(
+                self.residual_fusions[task_index](
+                    cls_state,
+                    pooled_text,
+                    gaze_batch.has_gaze,
+                )
+            )
+
+        return torch.stack(task_representations, dim=1), gmm_loss
+
+
 FUSION_ALIASES = {
     "pooling": "conditioned-pooling",
     "attention-bias": "postencoder-cls-attention-bias",
@@ -233,6 +420,9 @@ def build_gaze_fusion(
     dropout=0.1,
     attention_scale=0.1,
     train_attention_scale=True,
+    gmm_components=5,
+    gmm_temperature=1.0,
+    gmm_nll_weight=0.01,
 ):
     normalized = FUSION_ALIASES.get(strategy or "none", strategy or "none")
     if normalized == "none":
@@ -262,6 +452,17 @@ def build_gaze_fusion(
             num_heads=num_heads,
             num_layers=num_layers,
             max_positions=max_positions,
+            gate_init=gate_init,
+            dropout=dropout,
+        )
+    if normalized == "gmm-dual-gate-pooling":
+        return GmmDualGatePooling(
+            hidden_size=hidden_size,
+            gaze_dim=gaze_dim,
+            gaze_hidden_size=gaze_hidden_size,
+            gmm_components=gmm_components,
+            gmm_temperature=gmm_temperature,
+            gmm_nll_weight=gmm_nll_weight,
             gate_init=gate_init,
             dropout=dropout,
         )

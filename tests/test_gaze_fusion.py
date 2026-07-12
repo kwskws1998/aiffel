@@ -6,6 +6,7 @@ from va_gaze.models.gaze.fusion import (
     GazeBiasedClsAttention,
     GazeConditionedPooling,
     GazeCrossAttention,
+    GmmDualGatePooling,
     build_gaze_fusion,
 )
 from va_gaze.models.gaze.types import GazeBatch
@@ -97,6 +98,50 @@ class GazeFusionTest(unittest.TestCase):
             )
         ]
         self.assertTrue(all(isinstance(module, GazeBiasedClsAttention) for module in modules))
+
+    def test_gmm_dual_gate_returns_task_states_and_trainable_density_loss(self):
+        module = GmmDualGatePooling(
+            hidden_size=8,
+            gaze_dim=5,
+            gaze_hidden_size=6,
+            gmm_components=3,
+            gmm_nll_weight=0.01,
+            gate_init=0.0,
+            dropout=0.0,
+        )
+        features = torch.randn(2, 5, 5, requires_grad=True)
+        representations, gmm_loss = module(
+            self.cls_state,
+            self.text_states,
+            self._batch(features=features),
+        )
+        self.assertEqual(tuple(representations.shape), (2, 2, 8))
+        self.assertEqual(gmm_loss.ndim, 0)
+        self.assertTrue(torch.isfinite(representations).all())
+        self.assertTrue(torch.isfinite(gmm_loss))
+        (representations.sum() + gmm_loss).backward()
+        self.assertGreater(float(features.grad.abs().sum()), 0.0)
+        self.assertIsNotNone(module.gmm_means.grad)
+
+    def test_gmm_dual_gate_missing_gaze_returns_cls_for_both_tasks(self):
+        module = GmmDualGatePooling(
+            hidden_size=8,
+            gaze_dim=5,
+            gaze_hidden_size=6,
+            gmm_components=3,
+            gate_init=0.0,
+            dropout=0.0,
+        )
+        features = torch.randn(2, 5, 5)
+        empty_mask = torch.zeros_like(self.mapped_mask)
+        representations, gmm_loss = module(
+            self.cls_state,
+            self.text_states,
+            self._batch(features=features, mapped_mask=empty_mask),
+        )
+        expected = self.cls_state.unsqueeze(1).expand(-1, 2, -1)
+        torch.testing.assert_close(representations, expected, rtol=0.0, atol=0.0)
+        self.assertEqual(float(gmm_loss.detach()), 0.0)
 
 
 if __name__ == "__main__":

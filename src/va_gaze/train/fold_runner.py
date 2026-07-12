@@ -135,6 +135,8 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
             gaze_alignment_max_tokens=gaze_config.get(
                 "gaze_alignment_max_tokens", 512
             ),
+            gmm_temperature=gaze_config.get("gmm_temperature", 1.0),
+            gmm_nll_weight=gaze_config.get("gmm_nll_weight", 0.01),
             **shared_gaze_kwargs,
         )
 

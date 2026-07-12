@@ -16,6 +16,7 @@ CANONICAL_ADVANCED_GAZE_FUSIONS = (
     "conditioned-pooling",
     "postencoder-cls-attention-bias",
     "cross-attention",
+    "gmm-dual-gate-pooling",
 )
 ADVANCED_GAZE_FUSIONS = (
     *CANONICAL_ADVANCED_GAZE_FUSIONS,
@@ -46,8 +47,8 @@ def _json_vector(value):
 def _format_regression_logits(logits, output_dim):
     means = torch.nn.functional.hardsigmoid(3.0 * logits[:, :2])
     if int(output_dim) <= 2:
-        return means
-    return torch.cat((means, logits[:, 2:]), dim=-1)
+        return means.contiguous()
+    return torch.cat((means, logits[:, 2:]), dim=-1).contiguous()
 
 
 class DistilBertVARegressionHead(nn.Module):
@@ -66,7 +67,14 @@ class DistilBertVARegressionHead(nn.Module):
         hidden = self.pre_classifier(representation)
         hidden = torch.relu(hidden)
         hidden = self.dropout(hidden)
-        logits = self.classifier(hidden)
+        if hidden.ndim == 3:
+            if hidden.shape[1] != self.output_dim:
+                raise ValueError("Task-specific representations must match output_dim.")
+            logits = torch.einsum("bth,th->bt", hidden, self.classifier.weight)
+            if self.classifier.bias is not None:
+                logits = logits + self.classifier.bias
+        else:
+            logits = self.classifier(hidden)
         return _format_regression_logits(logits, self.output_dim)
 
 
@@ -87,7 +95,14 @@ class RobertaVARegressionHead(nn.Module):
         hidden = self.dense(hidden)
         hidden = torch.tanh(hidden)
         hidden = self.dropout(hidden)
-        logits = self.out_proj(hidden)
+        if hidden.ndim == 3:
+            if hidden.shape[1] != self.output_dim:
+                raise ValueError("Task-specific representations must match output_dim.")
+            logits = torch.einsum("bth,th->bt", hidden, self.out_proj.weight)
+            if self.out_proj.bias is not None:
+                logits = logits + self.out_proj.bias
+        else:
+            logits = self.out_proj(hidden)
         return _format_regression_logits(logits, self.output_dim)
 
 
@@ -163,6 +178,8 @@ class GazeFusionForSequenceRegression(nn.Module):
         gaze_alignment_dim=128,
         gaze_alignment_temperature=0.07,
         gaze_alignment_max_tokens=512,
+        gmm_temperature=1.0,
+        gmm_nll_weight=0.01,
         gaze_target_transform="signed-log1p",
         gaze_target_mean=None,
         gaze_target_scale=None,
@@ -188,6 +205,8 @@ class GazeFusionForSequenceRegression(nn.Module):
         self.fusion_strategy = normalize_advanced_fusion(fusion_strategy)
         if self.fusion_strategy not in (*CANONICAL_ADVANCED_GAZE_FUSIONS, "none"):
             raise ValueError(f"Unknown advanced gaze fusion: {fusion_strategy}")
+        if self.fusion_strategy == "gmm-dual-gate-pooling" and self.output_dim != 2:
+            raise ValueError("gmm-dual-gate-pooling currently supports two-output VA regression only.")
 
         self.gaze_aux_weight = float(gaze_aux_weight)
         self.gaze_alignment_weight = float(gaze_alignment_weight)
@@ -218,6 +237,9 @@ class GazeFusionForSequenceRegression(nn.Module):
             dropout=gaze_fusion_dropout,
             attention_scale=gaze_attention_scale,
             train_attention_scale=train_gaze_attention_scale,
+            gmm_components=gmm_components,
+            gmm_temperature=gmm_temperature,
+            gmm_nll_weight=gmm_nll_weight,
         )
 
         self.gaze_prediction = None
@@ -268,6 +290,8 @@ class GazeFusionForSequenceRegression(nn.Module):
             "gaze_alignment_dim": int(gaze_alignment_dim),
             "gaze_alignment_temperature": float(gaze_alignment_temperature),
             "gaze_alignment_max_tokens": int(gaze_alignment_max_tokens),
+            "gmm_temperature": float(gmm_temperature),
+            "gmm_nll_weight": float(gmm_nll_weight),
             "gaze_target_transform": gaze_target_transform,
             "gaze_target_mean": _json_vector(gaze_target_mean),
             "gaze_target_scale": _json_vector(gaze_target_scale),
@@ -504,8 +528,13 @@ class GazeFusionForSequenceRegression(nn.Module):
                 dtype=text_states.dtype,
             )
 
+        fusion_auxiliary_loss = None
         if gaze_batch is not None and needs_primary_gaze:
-            representation = self.fusion(cls_state, text_states, gaze_batch)
+            fusion_output = self.fusion(cls_state, text_states, gaze_batch)
+            if isinstance(fusion_output, tuple):
+                representation, fusion_auxiliary_loss = fusion_output
+            else:
+                representation = fusion_output
         else:
             representation = cls_state
         logits = self.regression_head(representation)
@@ -513,6 +542,8 @@ class GazeFusionForSequenceRegression(nn.Module):
         auxiliary_loss = None
         if self.training and gaze_batch is not None:
             terms = []
+            if fusion_auxiliary_loss is not None:
+                terms.append(fusion_auxiliary_loss)
             if self.gaze_prediction is not None:
                 terms.append(
                     self.gaze_aux_weight * self.gaze_prediction(text_states, gaze_batch)

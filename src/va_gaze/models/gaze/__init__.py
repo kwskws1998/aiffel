@@ -7,6 +7,7 @@ from va_gaze.models.gaze.fusion import (
     GazeBiasedClsAttention,
     GazeConditionedPooling,
     GazeCrossAttention,
+    GmmDualGatePooling,
     IdentityGazeFusion,
     build_gaze_fusion,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "GazeBiasedClsAttention",
     "GazeConditionedPooling",
     "GazeCrossAttention",
+    "GmmDualGatePooling",
     "GazeFeatureProvider",
     "IdentityGazeFusion",
     "MaskedGazePrediction",

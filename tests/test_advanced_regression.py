@@ -186,6 +186,30 @@ class AdvancedRegressionTest(unittest.TestCase):
         total.backward()
         self.assertTrue(any(parameter.grad is not None for parameter in model.gaze_alignment.parameters()))
 
+    def test_gmm_dual_gate_uses_task_specific_heads_and_auxiliary_density_loss(self):
+        model = self._model(
+            fusion_strategy="gmm-dual-gate-pooling",
+            features_used=[1, 1, 1, 1, 1],
+            gmm_components=3,
+            gmm_temperature=1.0,
+            gmm_nll_weight=0.01,
+        )
+        model.train()
+        outputs = model(input_ids=self.input_ids, attention_mask=self.attention_mask)
+        self.assertEqual(tuple(outputs.logits.shape), (2, 2))
+        self.assertTrue(torch.isfinite(outputs.logits).all())
+        self.assertIsNotNone(outputs.loss)
+        self.assertTrue(torch.isfinite(outputs.loss))
+        (outputs.logits.mean() + outputs.loss).backward()
+        self.assertIsNotNone(model.fusion.gmm_means.grad)
+
+        model.eval()
+        inference_outputs = model(
+            input_ids=self.input_ids,
+            attention_mask=self.attention_mask,
+        )
+        self.assertIsNone(inference_outputs.loss)
+
     def test_heteroscedastic_output_shape(self):
         model = self._model(fusion_strategy="conditioned-pooling", output_dim=4)
         outputs = model(input_ids=self.input_ids, attention_mask=self.attention_mask)

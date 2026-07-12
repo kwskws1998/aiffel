@@ -499,6 +499,11 @@ positions. They share a lazy gaze provider and a common regression head:
   consumed by the regression head.
 - `cross-attention`: CLS queries a separately projected text-order gaze stream through
   gated cross-attention.
+- `gmm-dual-gate-pooling`: all five ET features feed a fold-local learnable diagonal
+  GMM. Posterior responsibilities and entropy confidence condition separate valence
+  and arousal feature gates; each task then gaze-conditions text-token pooling and
+  adds the pooled context to CLS through a gated residual. The GMM is learned only
+  from training batches, so no validation/test feature artifact is fitted in advance.
 
 `cls-attention-bias` and `attention-bias` remain accepted aliases for the explicit
 `postencoder-cls-attention-bias` name.
@@ -524,7 +529,21 @@ python train_model.py xlmroberta-base mse+ccc \
   --et-model-id skboy/emotion_et_model \
   --gaze-hidden-size 128 \
   --gaze-num-heads 4
+
+python train_model.py xlmroberta-base mse \
+  --gaze-fusion gmm-dual-gate-pooling \
+  --et-model-type et2 \
+  --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
+  --features-used 1,1,1,1,1 \
+  --gmm-components 5 \
+  --gmm-temperature 1.0 \
+  --gmm-nll-weight 0.01
 ```
+
+`gmm-dual-gate-pooling` requires all five ET2 or emotion-ET features and currently
+supports two-output VA regression with non-heteroscedastic losses. `gmm_components`
+is the number of latent gaze regimes, not the number of raw ET features. The NLL
+term regularizes the learned mixture while the VA loss trains the task-specific gates.
 
 Two training-only objectives are orthogonal to the primary fusion choice:
 
@@ -589,9 +608,11 @@ python train_model.py <model> <loss> \
   [--et-model-type et2|emotion-et|et-meco] \
   [--et-model-id <hf_repo_or_local_path>] \
   [--gaze-transform raw|pca|gmm] \
-  [--gaze-fusion concat|postfix-concat|prefix-concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention] \
+  [--gaze-fusion concat|postfix-concat|prefix-concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention|gmm-dual-gate-pooling] \
   [--gaze-artifact-dir <path>] \
   [--gmm-components <int>] \
+  [--gmm-temperature <float>] \
+  [--gmm-nll-weight <float>] \
   [--pca-components <int>] \
   [--features-used <f1,f2,f3,f4,f5>] \
   [--fp-dropout <p1,p2>] \
