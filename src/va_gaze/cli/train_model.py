@@ -45,6 +45,7 @@ GAZE_FUSION_CHOICES = [
     "attention-bias",
     "cross-attention",
     "gmm-dual-gate-pooling",
+    "gmm-arousal-residual",
 ]
 GAZE_FUSION_ALIASES = {
     "concat": "postfix-concat",
@@ -148,6 +149,17 @@ def _build_parser():
     parser.add_argument("--gmm-components", type=int, default=5)
     parser.add_argument("--gmm-temperature", type=float, default=1.0)
     parser.add_argument("--gmm-nll-weight", type=float, default=0.01)
+    parser.add_argument(
+        "--gmm-residual-mode",
+        choices=["posterior", "component-linear"],
+        default="component-linear",
+    )
+    parser.add_argument("--gmm-fit-max-examples", type=int, default=5000)
+    parser.add_argument("--gmm-fit-max-tokens", type=int, default=50000)
+    parser.add_argument("--gmm-reg-covar", type=float, default=1e-4)
+    parser.add_argument("--gmm-n-init", type=int, default=5)
+    parser.add_argument("--gmm-residual-l2", type=float, default=1e-4)
+    parser.add_argument("--gaze-learning-rate", type=float, default=1e-3)
     parser.add_argument("--pca-components", type=int, default=2)
     parser.add_argument("--features-used", default="1,1,1,1,1")
     parser.add_argument("--fp-dropout", default="0.0,0.3")
@@ -263,6 +275,12 @@ def _validate_args(parser, args):
         parser.error("gmm_temperature must be > 0.")
     if args.gmm_nll_weight < 0:
         parser.error("gmm_nll_weight must be >= 0.")
+    if args.gmm_reg_covar <= 0:
+        parser.error("gmm_reg_covar must be > 0.")
+    if args.gmm_residual_l2 < 0:
+        parser.error("gmm_residual_l2 must be >= 0.")
+    if args.gaze_learning_rate <= 0:
+        parser.error("gaze_learning_rate must be > 0.")
     if args.gaze_num_layers < 0:
         parser.error("gaze_num_layers must be >= 0.")
 
@@ -376,9 +394,36 @@ def _validate_args(parser, args):
             parser.error(
                 "--gaze-fusion gmm-dual-gate-pooling requires --gmm-components >= 2."
             )
+    if resolved_fusion == "gmm-arousal-residual":
+        if args.et_model_type not in ("et2", "emotion-et", "heuristic"):
+            parser.error(
+                "--gaze-fusion gmm-arousal-residual requires a five-feature "
+                "--et-model-type et2 or emotion-et predictor (heuristic is smoke-only)."
+            )
+        if features_used != [1, 1, 1, 1, 1]:
+            parser.error(
+                "--gaze-fusion gmm-arousal-residual requires "
+                "--features-used 1,1,1,1,1."
+            )
+        if args.gaze_transform != "raw":
+            parser.error(
+                "--gaze-fusion gmm-arousal-residual fits a fold-local GMM; "
+                "use --gaze-transform raw."
+            )
+        if args.loss == "hetero":
+            parser.error(
+                "--gaze-fusion gmm-arousal-residual does not support hetero loss."
+            )
+        if args.gmm_residual_mode == "posterior" and args.gmm_components < 2:
+            parser.error(
+                "posterior GMM residual requires --gmm-components >= 2."
+            )
     args.gaze_fusion = resolved_fusion
 
     _validate_positive_int("gmm_components", args.gmm_components)
+    _validate_positive_int("gmm_fit_max_examples", args.gmm_fit_max_examples)
+    _validate_positive_int("gmm_fit_max_tokens", args.gmm_fit_max_tokens)
+    _validate_positive_int("gmm_n_init", args.gmm_n_init)
     _validate_positive_int("pca_components", args.pca_components)
 
     if args.save_strategy == "no" and args.load_best_model_at_end:
@@ -438,6 +483,12 @@ def main():
         "gmm_components": args.gmm_components,
         "gmm_temperature": args.gmm_temperature,
         "gmm_nll_weight": args.gmm_nll_weight,
+        "gmm_residual_mode": args.gmm_residual_mode,
+        "gmm_fit_max_examples": args.gmm_fit_max_examples,
+        "gmm_fit_max_tokens": args.gmm_fit_max_tokens,
+        "gmm_reg_covar": args.gmm_reg_covar,
+        "gmm_n_init": args.gmm_n_init,
+        "gmm_residual_l2": args.gmm_residual_l2,
         "pca_components": args.pca_components,
         "features_used": features_used,
         "fp_dropout": fp_dropout,
@@ -480,6 +531,7 @@ def main():
         "load_best_model_at_end": args.load_best_model_at_end,
         "data_dir": args.data_dir,
         "report_to": args.report_to,
+        "gaze_learning_rate": args.gaze_learning_rate,
     }
     run_parameters = {
         "model": args.model,
@@ -497,6 +549,12 @@ def main():
         "gmm_components": gaze_config["gmm_components"],
         "gmm_temperature": gaze_config["gmm_temperature"],
         "gmm_nll_weight": gaze_config["gmm_nll_weight"],
+        "gmm_residual_mode": gaze_config["gmm_residual_mode"],
+        "gmm_fit_max_examples": gaze_config["gmm_fit_max_examples"],
+        "gmm_fit_max_tokens": gaze_config["gmm_fit_max_tokens"],
+        "gmm_reg_covar": gaze_config["gmm_reg_covar"],
+        "gmm_n_init": gaze_config["gmm_n_init"],
+        "gmm_residual_l2": gaze_config["gmm_residual_l2"],
         "pca_components": gaze_config["pca_components"],
         "features_used": gaze_config["features_used"],
         "fp_dropout": gaze_config["fp_dropout"],

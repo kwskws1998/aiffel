@@ -9,6 +9,7 @@ import torch
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, RobertaConfig, RobertaModel
 
+from va_gaze.models.gaze.alignment import remap_word_features_to_tokens
 from va_gaze.models.gaze.feature_schema import FEATURE_NAMES, TRT_INDEX
 
 try:
@@ -111,9 +112,9 @@ class EmotionEtFixationsPredictor:
         text = self.rm_tokenizer.decode(ids_no_pad, skip_special_tokens=True)
 
         word_features, words = self._predict_words(text)
-        remapped = self._remap_to_rm_tokens(word_features, words, ids, mask)
+        remapped, mapped_mask = self._remap_to_rm_tokens(word_features, words, ids, mask)
         fixations = remapped.unsqueeze(0).to(input_ids_rm.device)
-        fix_attn = torch.tensor(mask, dtype=torch.long).unsqueeze(0).to(input_ids_rm.device)
+        fix_attn = mapped_mask.to(dtype=torch.long).unsqueeze(0).to(input_ids_rm.device)
         return fixations, fix_attn, None, None, None, None
 
     def _predict_words(self, text):
@@ -176,53 +177,11 @@ class EmotionEtFixationsPredictor:
         return re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
 
     def _remap_to_rm_tokens(self, word_features, words, rm_ids, rm_mask):
-        seq_len = len(rm_ids)
-        output = torch.zeros(seq_len, self.feature_dim, dtype=torch.float32)
-        if len(word_features) == 0 or len(words) == 0:
-            return output
-
-        rm_tokens = self.rm_tokenizer.convert_ids_to_tokens(rm_ids)
-        word_to_rm = _align_words_to_rm_tokens(words, rm_tokens, self.rm_tokenizer)
-
-        n_words = min(len(words), len(word_features))
-        for word_idx in range(n_words):
-            if word_idx >= len(word_to_rm):
-                break
-            indices = word_to_rm[word_idx]
-            if not indices:
-                continue
-            first = indices[0]
-            if first < seq_len and rm_mask[first] == 1:
-                output[first] = torch.tensor(word_features[word_idx], dtype=torch.float32)
-        return output
-
-
-def _align_words_to_rm_tokens(words, rm_tokens, rm_tokenizer):
-    special_ids = set(rm_tokenizer.all_special_ids)
-    word_to_indices = []
-    token_idx = 0
-
-    for word in words:
-        indices = []
-        chars_remaining = len(_normalize_for_alignment(word))
-        while token_idx < len(rm_tokens) and chars_remaining > 0:
-            token = rm_tokens[token_idx]
-            token_id = rm_tokenizer.convert_tokens_to_ids(token)
-            if token_id in special_ids:
-                token_idx += 1
-                continue
-
-            token_clean = _normalize_for_alignment(token.lstrip("Ġ▁ "))
-            if token_clean:
-                indices.append(token_idx)
-                chars_remaining -= len(token_clean)
-            token_idx += 1
-        word_to_indices.append(indices)
-    return word_to_indices
-
-
-def _normalize_for_alignment(text):
-    text = str(text).lstrip("Ġ▁ ")
-    if text.startswith("##"):
-        text = text[2:]
-    return re.sub(r"\s+", "", text)
+        return remap_word_features_to_tokens(
+            word_features=word_features,
+            words=words,
+            token_ids=rm_ids,
+            attention_mask=rm_mask,
+            tokenizer=self.rm_tokenizer,
+            feature_dim=self.feature_dim,
+        )

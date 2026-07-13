@@ -173,11 +173,7 @@ class GazeFeatureProvider:
             raw_fixations = raw_fixations.squeeze(0).float().cpu()
             predictor_mask = predictor_mask.squeeze(0).to(dtype=torch.bool).cpu()
             finite_mask = torch.isfinite(raw_fixations).all(dim=-1)
-            mapped_mask = (
-                predictor_mask
-                & finite_mask
-                & raw_fixations.abs().sum(dim=-1).gt(0)
-            )
+            mapped_mask = predictor_mask & finite_mask
             raw_fixations = torch.nan_to_num(raw_fixations)
             if self.feature_indices is not None:
                 raw_fixations = raw_fixations[:, self.feature_indices]

@@ -85,6 +85,51 @@ def _split_heteroscedastic_logits(logits):
 class VARegressionTrainer(Trainer):
     """Shared trainer base that keeps custom gaze models reloadable at every save."""
 
+    def __init__(self, *args, gaze_learning_rate=None, **kwargs):
+        self.gaze_learning_rate = gaze_learning_rate
+        self._gaze_learning_rate_applied = False
+        super().__init__(*args, **kwargs)
+
+    def create_optimizer(self):
+        """Place an explicitly exposed gaze residual in its own learning-rate group."""
+
+        optimizer = super().create_optimizer()
+        if self._gaze_learning_rate_applied or self.gaze_learning_rate is None:
+            return optimizer
+
+        model = self.accelerator.unwrap_model(self.model)
+        parameter_getter = getattr(model, "gaze_residual_parameters", None)
+        residual_parameters = list(parameter_getter()) if callable(parameter_getter) else []
+        residual_parameter_ids = {
+            id(parameter) for parameter in residual_parameters if parameter.requires_grad
+        }
+        if not residual_parameter_ids:
+            self._gaze_learning_rate_applied = True
+            return optimizer
+
+        moved_parameters = []
+        retained_groups = []
+        for group in optimizer.param_groups:
+            retained_parameters = []
+            for parameter in group["params"]:
+                if id(parameter) in residual_parameter_ids:
+                    moved_parameters.append(parameter)
+                else:
+                    retained_parameters.append(parameter)
+            if retained_parameters:
+                group["params"] = retained_parameters
+                retained_groups.append(group)
+        optimizer.param_groups[:] = retained_groups
+        optimizer.add_param_group(
+            {
+                "params": moved_parameters,
+                "lr": float(self.gaze_learning_rate),
+                "weight_decay": 0.0,
+            }
+        )
+        self._gaze_learning_rate_applied = True
+        return optimizer
+
     def _save(self, output_dir=None, state_dict=None):
         super()._save(output_dir=output_dir, state_dict=state_dict)
         target_dir = output_dir or self.args.output_dir

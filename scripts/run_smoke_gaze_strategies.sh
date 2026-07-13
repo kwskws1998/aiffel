@@ -92,6 +92,12 @@ run_condition() {
     "$PYTHON_BIN" -c \
       'import json,sys; p=json.load(open(sys.argv[1])); assert p["gaze_fusion"]=="prefix-concat"' \
       "$result_dir/training_parameters.json"
+  elif [[ "$name" == "gmm_arousal_residual" ]]; then
+    test -s "$result_dir/gmm_fit_fold1.json"
+    test -s "$result_dir/gmm_fit_fold2.json"
+    "$PYTHON_BIN" -c \
+      'import json,sys; p=json.load(open(sys.argv[1])); assert p["gaze_fusion"]=="gmm-arousal-residual"; assert p["features_used"]==[1,1,1,1,1]' \
+      "$result_dir/training_parameters.json"
   fi
   printf '%s\n' "$name" > "$sentinel"
   test "$(<"$sentinel")" = "$name"
@@ -103,6 +109,13 @@ run_condition gaze_summary --gaze-fusion summary
 run_condition conditioned_pooling --gaze-fusion conditioned-pooling
 run_condition postencoder_cls_attention_bias --gaze-fusion postencoder-cls-attention-bias
 run_condition cross_attention --gaze-fusion cross-attention
+run_condition gmm_arousal_residual \
+  --gaze-fusion gmm-arousal-residual \
+  --features-used 1,1,1,1,1 \
+  --gmm-components 2 \
+  --gmm-residual-mode component-linear \
+  --gmm-fit-max-examples 4 \
+  --gmm-fit-max-tokens 64
 run_condition auxiliary_only --gaze-aux-weight 0.1
 run_condition alignment_only --gaze-alignment-weight 0.05
 run_condition postfix_concat --gaze-fusion postfix-concat

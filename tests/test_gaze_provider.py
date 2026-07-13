@@ -11,13 +11,16 @@ class DummyTokenizer:
 
 
 class FakePredictor:
-    def __init__(self, features):
+    def __init__(self, features, mapped_mask=None):
         self.features = features
+        self.mapped_mask = mapped_mask
         self.model = nn.Sequential(nn.Linear(2, 2), nn.Dropout(0.5))
 
     def _compute_mapped_fixations(self, input_ids, attention_mask):
         features = self.features[:, : input_ids.shape[1]].to(input_ids.device)
-        return features, attention_mask, None, None, None, None
+        mapped_mask = attention_mask if self.mapped_mask is None else self.mapped_mask
+        mapped_mask = mapped_mask[:, : input_ids.shape[1]].to(input_ids.device)
+        return features, mapped_mask, None, None, None, None
 
 
 class ProviderContainer(nn.Module):
@@ -45,7 +48,10 @@ class GazeProviderTest(unittest.TestCase):
         raw = torch.zeros(1, 4, 5)
         raw[0, 1, 0] = 3.0
         raw[0, 2, 3] = 4.0
-        predictor = FakePredictor(raw)
+        predictor = FakePredictor(
+            raw,
+            mapped_mask=torch.tensor([[0, 1, 1, 0]]),
+        )
         provider = GazeFeatureProvider(
             tokenizer=DummyTokenizer(),
             et_model_type="heuristic",
@@ -84,7 +90,10 @@ class GazeProviderTest(unittest.TestCase):
             tokenizer=DummyTokenizer(),
             et_model_type="heuristic",
         )
-        provider.fp_model = FakePredictor(raw)
+        provider.fp_model = FakePredictor(
+            raw,
+            mapped_mask=torch.tensor([[0, 1, 1, 1]]),
+        )
         batch = provider.compute(
             torch.tensor([[1, 7, 8, 2]]),
             torch.ones(1, 4, dtype=torch.long),
@@ -92,6 +101,23 @@ class GazeProviderTest(unittest.TestCase):
         self.assertEqual(batch.mapped_mask.tolist(), [[False, False, False, True]])
         self.assertTrue(torch.isfinite(batch.features).all())
         self.assertTrue(batch.features[~batch.mapped_mask].eq(0).all())
+
+    def test_all_zero_gaze_remains_valid_when_predictor_marks_it_mapped(self):
+        raw = torch.zeros(1, 4, 5)
+        provider = GazeFeatureProvider(
+            tokenizer=DummyTokenizer(),
+            et_model_type="heuristic",
+        )
+        provider.fp_model = FakePredictor(
+            raw,
+            mapped_mask=torch.tensor([[0, 1, 0, 0]]),
+        )
+        batch = provider.compute(
+            torch.tensor([[1, 7, 8, 2]]),
+            torch.ones(1, 4, dtype=torch.long),
+        )
+        self.assertEqual(batch.mapped_mask.tolist(), [[False, True, False, False]])
+        self.assertTrue(batch.features.eq(0).all())
 
     def test_noncontiguous_attention_mask_is_rejected(self):
         provider = GazeFeatureProvider(

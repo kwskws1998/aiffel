@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import torch
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -17,6 +18,7 @@ from transformers import (
     PreTrainedTokenizerFast,
     RobertaConfig,
     RobertaModel,
+    XLMRobertaConfig,
 )
 
 from va_gaze.models.advanced_regression import (
@@ -26,6 +28,11 @@ from va_gaze.models.advanced_regression import (
     RobertaVARegressionHead,
 )
 from va_gaze.models.gaze.objectives import MaskedGazePrediction
+from va_gaze.models.gaze.simple_gmm import fit_diagonal_gmm
+from va_gaze.models.regression import (
+    DistilBertForSequenceClassificationSig,
+    XLMRobertaForSequenceClassificationSig,
+)
 from va_gaze.train.custom_trainer import _add_model_auxiliary_loss
 
 
@@ -210,6 +217,48 @@ class AdvancedRegressionTest(unittest.TestCase):
         )
         self.assertIsNone(inference_outputs.loss)
 
+    def test_fixed_gmm_residual_starts_at_baseline_and_changes_only_arousal(self):
+        model = self._model(
+            fusion_strategy="gmm-arousal-residual",
+            features_used=[1, 1, 1, 1, 1],
+            gmm_components=2,
+            gmm_residual_mode="component-linear",
+            gmm_residual_l2=0.0,
+        )
+        fit_rows = np.asarray(
+            [
+                [0.1, 0.2, 0.3, 0.4, 0.5],
+                [0.2, 0.1, 0.4, 0.3, 0.6],
+                [1.1, 1.2, 1.3, 1.4, 1.5],
+                [1.2, 1.1, 1.4, 1.3, 1.6],
+            ],
+            dtype=np.float64,
+        )
+        model.gmm_residual.set_fit(
+            fit_diagonal_gmm(fit_rows, n_components=2, random_state=7)
+        )
+        model.eval()
+        with torch.no_grad():
+            encoder_outputs = model._encode_text(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            )
+            expected = model.regression_head(encoder_outputs.last_hidden_state[:, 0, :])
+            zero_residual = model(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+        torch.testing.assert_close(zero_residual, expected, rtol=0.0, atol=0.0)
+
+        with torch.no_grad():
+            model.gmm_residual.correction.weight.fill_(0.05)
+            corrected = model(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+        torch.testing.assert_close(corrected[:, 0], expected[:, 0], rtol=0.0, atol=0.0)
+        self.assertFalse(torch.equal(corrected[:, 1], expected[:, 1]))
+
     def test_heteroscedastic_output_shape(self):
         model = self._model(fusion_strategy="conditioned-pooling", output_dim=4)
         outputs = model(input_ids=self.input_ids, attention_mask=self.attention_mask)
@@ -236,8 +285,104 @@ class AdvancedRegressionTest(unittest.TestCase):
             head.pre_classifier.bias.zero_()
             head.classifier.weight.zero_()
             head.classifier.bias.copy_(torch.tensor([1.0, -1.0]))
-        output = head(torch.zeros(1, 3))
+        raw_logits = head.raw_logits(torch.zeros(1, 3))
+        torch.testing.assert_close(raw_logits, torch.tensor([[1.0, -1.0]]))
+        output = head.format_logits(raw_logits)
         torch.testing.assert_close(output, torch.tensor([[1.0, 0.0]]))
+
+    def test_distilbert_baseline_transplant_has_exact_eval_zero_fusion_parity(self):
+        config = DistilBertConfig(
+            vocab_size=32,
+            dim=16,
+            hidden_dim=32,
+            n_layers=1,
+            n_heads=4,
+            max_position_embeddings=32,
+            dropout=0.0,
+            attention_dropout=0.0,
+            seq_classif_dropout=0.0,
+            num_labels=2,
+        )
+        baseline = DistilBertForSequenceClassificationSig(config)
+        advanced = GazeFusionForSequenceRegression.from_baseline_model(
+            baseline_model=baseline,
+            tokenizer=TinyTokenizer(),
+            fusion_strategy="none",
+            et_model_type="heuristic",
+            load_fixation_model=False,
+            gaze_fusion_dropout=0.0,
+        )
+        baseline.eval()
+        advanced.eval()
+
+        with torch.no_grad():
+            expected = baseline(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+            actual = advanced(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+
+        self.assertIs(advanced.encoder, baseline.distilbert)
+        self.assertIs(
+            advanced.regression_head.pre_classifier,
+            baseline.pre_classifier,
+        )
+        self.assertIs(advanced.regression_head.dropout, baseline.dropout)
+        self.assertIs(advanced.regression_head.classifier, baseline.classifier)
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    def test_xlm_roberta_baseline_transplant_has_exact_eval_zero_fusion_parity(self):
+        config = XLMRobertaConfig(
+            vocab_size=32,
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            intermediate_size=32,
+            max_position_embeddings=32,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
+            classifier_dropout=0.0,
+            pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=2,
+            num_labels=2,
+        )
+        baseline = XLMRobertaForSequenceClassificationSig(config)
+        advanced = GazeFusionForSequenceRegression.from_baseline_model(
+            baseline_model=baseline,
+            tokenizer=TinyTokenizer(),
+            fusion_strategy="none",
+            et_model_type="heuristic",
+            load_fixation_model=False,
+            gaze_fusion_dropout=0.0,
+        )
+        baseline.eval()
+        advanced.eval()
+
+        with torch.no_grad():
+            expected = baseline(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+            actual = advanced(
+                input_ids=self.input_ids,
+                attention_mask=self.attention_mask,
+            ).logits
+
+        self.assertIs(advanced.encoder, baseline.roberta)
+        self.assertIs(
+            advanced.regression_head.dropout,
+            baseline.classifier.dropout,
+        )
+        self.assertIs(advanced.regression_head.dense, baseline.classifier.dense)
+        self.assertIs(
+            advanced.regression_head.out_proj,
+            baseline.classifier.out_proj,
+        )
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
     def test_roberta_aux_only_uses_exact_baseline_head_family(self):
         model = self._model(
@@ -315,6 +460,56 @@ class AdvancedRegressionTest(unittest.TestCase):
             reloaded = GazeFusionForSequenceRegression.from_pretrained(bundle_dir)
             self.assertIsInstance(reloaded.regression_head, RobertaVARegressionHead)
             actual = reloaded(**encoded).logits.detach()
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    def test_fixed_gmm_bundle_preserves_fit_and_residual_coefficients(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            encoder_dir = root / "encoder"
+            tokenizer = save_tiny_tokenizer(encoder_dir)
+            encoder = tiny_roberta_encoder()
+            encoder.save_pretrained(encoder_dir)
+            model = GazeFusionForSequenceRegression(
+                checkpoint=str(encoder_dir),
+                tokenizer=tokenizer,
+                fusion_strategy="gmm-arousal-residual",
+                et_model_type="heuristic",
+                features_used=[1, 1, 1, 1, 1],
+                gmm_components=2,
+                gmm_residual_mode="component-linear",
+                gaze_fusion_dropout=0.0,
+            )
+            fit_rows = np.asarray(
+                [
+                    [0.1, 0.2, 0.3, 0.4, 0.5],
+                    [0.2, 0.1, 0.4, 0.3, 0.6],
+                    [1.1, 1.2, 1.3, 1.4, 1.5],
+                    [1.2, 1.1, 1.4, 1.3, 1.6],
+                ],
+                dtype=np.float64,
+            )
+            model.gmm_residual.set_fit(
+                fit_diagonal_gmm(fit_rows, n_components=2, random_state=11)
+            )
+            with torch.no_grad():
+                model.gmm_residual.correction.weight.copy_(
+                    torch.linspace(
+                        -0.1,
+                        0.1,
+                        model.gmm_residual.correction.weight.numel(),
+                    ).view(1, -1)
+                )
+            model.eval()
+            encoded = tokenizer("calm bright", return_tensors="pt")
+            expected = model(**encoded).logits.detach()
+
+            bundle_dir = root / "gmm_bundle"
+            model.save_pretrained(bundle_dir)
+            reloaded = GazeFusionForSequenceRegression.from_pretrained(bundle_dir)
+            actual = reloaded(**encoded).logits.detach()
+
+            self.assertTrue(bool(reloaded.gmm_residual.is_fitted.item()))
+            self.assertEqual(reloaded.gmm_residual.mode, "component-linear")
             torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 

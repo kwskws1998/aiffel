@@ -504,6 +504,14 @@ positions. They share a lazy gaze provider and a common regression head:
   and arousal feature gates; each task then gaze-conditions text-token pooling and
   adds the pooled context to CLS through a gated residual. The GMM is learned only
   from training batches, so no validation/test feature artifact is fitted in advance.
+- `gmm-arousal-residual`: the deliberately small alternative. Each example is reduced
+  to the masked mean of `log1p` all-five gaze features and robust-scaled with train-fold
+  median/IQR statistics. A one-dimensional diagonal GMM models their mean reading-effort
+  axis and is then frozen. Its posterior softly gates linear experts that still receive
+  all five standardized features. Their centered output corrects the raw Arousal logit
+  only; Valence and the baseline CLS path remain unchanged. The recommended `K=3`
+  `component-linear` form adds 18 coefficients, versus millions of parameters in the
+  dual-gate model. `K=1` is the five-coefficient raw-feature linear control.
 
 `cls-attention-bias` and `attention-bias` remain accepted aliases for the explicit
 `postencoder-cls-attention-bias` name.
@@ -538,12 +546,37 @@ python train_model.py xlmroberta-base mse \
   --gmm-components 5 \
   --gmm-temperature 1.0 \
   --gmm-nll-weight 0.01
+
+python train_model.py distilbert mse \
+  --gaze-fusion gmm-arousal-residual \
+  --et-model-type et2 \
+  --et2-checkpoint ./checkpoints/et_predictor2_seed123 \
+  --features-used 1,1,1,1,1 \
+  --gmm-components 3 \
+  --gmm-residual-mode component-linear \
+  --gaze-learning-rate 1e-3 \
+  --data-dir ./data_no_iemocap \
+  --preds-dir ./Preds/distilbert_gmm_arousal_residual_et2_all5_seed42 \
+  --seed 42 \
+  --batch-size 16 \
+  --maxlen 200 \
+  --train-epochs 10 \
+  --learning-rate 6e-6 \
+  --save-strategy no \
+  --no-save-final-model \
+  --report-to none
 ```
 
 `gmm-dual-gate-pooling` requires all five ET2 or emotion-ET features and currently
 supports two-output VA regression with non-heteroscedastic losses. `gmm_components`
 is the number of latent gaze regimes, not the number of raw ET features. The NLL
 term regularizes the learned mixture while the VA loss trains the task-specific gates.
+
+For a clean GMM claim, run the same command once with `--gmm-components 1`. That
+condition is a raw all-five linear Arousal residual. Keep GMM only if the `K=3`
+condition beats `K=1` and a shuffled-gaze control on Arousal MSE, Pearson, and CCC.
+Each run writes `gmm_fit_fold1.json` and `gmm_fit_fold2.json` with fold-local scaler,
+mixture, convergence, occupancy, and collection diagnostics.
 
 Two training-only objectives are orthogonal to the primary fusion choice:
 
@@ -608,11 +641,18 @@ python train_model.py <model> <loss> \
   [--et-model-type et2|emotion-et|et-meco] \
   [--et-model-id <hf_repo_or_local_path>] \
   [--gaze-transform raw|pca|gmm] \
-  [--gaze-fusion concat|postfix-concat|prefix-concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention|gmm-dual-gate-pooling] \
+  [--gaze-fusion concat|postfix-concat|prefix-concat|add|gmm-adapter|summary|conditioned-pooling|postencoder-cls-attention-bias|cross-attention|gmm-dual-gate-pooling|gmm-arousal-residual] \
   [--gaze-artifact-dir <path>] \
   [--gmm-components <int>] \
   [--gmm-temperature <float>] \
   [--gmm-nll-weight <float>] \
+  [--gmm-residual-mode posterior|component-linear] \
+  [--gmm-fit-max-examples <int>] \
+  [--gmm-fit-max-tokens <int>] \
+  [--gmm-reg-covar <float>] \
+  [--gmm-n-init <int>] \
+  [--gmm-residual-l2 <float>] \
+  [--gaze-learning-rate <float>] \
   [--pca-components <int>] \
   [--features-used <f1,f2,f3,f4,f5>] \
   [--fp-dropout <p1,p2>] \
@@ -646,9 +686,9 @@ python train_model.py <model> <loss> \
 ### Reproducible offline smoke matrix
 
 The smoke harness creates tiny random encoders/tokenizers and legal synthetic VA folds,
-then runs both folds for one optimizer step under ten conditions: baseline, GazeAdd,
-GazeSummary, three post-encoder fusions, two training-only objectives, postfix concat,
-and the explicit legacy prefix ablation:
+then runs both folds for one optimizer step under eleven conditions: baseline, GazeAdd,
+GazeSummary, three neural post-encoder fusions, the fixed GMM residual, two training-only
+objectives, postfix concat, and the explicit legacy prefix ablation:
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
@@ -658,7 +698,7 @@ bash scripts/run_smoke_postfix_concat_backbones.sh
 
 The second script checks postfix concat under all three experiment selectors:
 `distilbert`, `xlmroberta-base`, and `xlmroberta-large`.
-For the exhaustive ten-condition by three-backbone matrix, run:
+For the exhaustive eleven-condition by three-backbone matrix, run:
 
 ```bash
 MODEL_NAME=all SMOKE_ROOT=artifacts/gaze_all_backbone_smoke \

@@ -141,6 +141,46 @@ class TrainCliValidationTest(unittest.TestCase):
             "requires --gmm-components >= 2",
         )
 
+    def test_gmm_arousal_residual_validates_simple_fold_fixed_configuration(self):
+        args = parse_and_validate(
+            [
+                "xlmroberta-base",
+                "mse",
+                "--gaze-fusion",
+                "gmm-arousal-residual",
+                "--et-model-type",
+                "et2",
+                "--features-used",
+                "1,1,1,1,1",
+                "--gmm-components",
+                "3",
+                "--gmm-residual-mode",
+                "component-linear",
+            ]
+        )
+        self.assertEqual(args.gaze_fusion, "gmm-arousal-residual")
+        self.assertEqual(args.gmm_residual_mode, "component-linear")
+        self.assert_cli_error(
+            [
+                "--gaze-fusion",
+                "gmm-arousal-residual",
+                "--features-used",
+                "0,0,0,1,0",
+            ],
+            "requires --features-used 1,1,1,1,1",
+        )
+        self.assert_cli_error(
+            [
+                "--gaze-fusion",
+                "gmm-arousal-residual",
+                "--gmm-residual-mode",
+                "posterior",
+                "--gmm-components",
+                "1",
+            ],
+            "posterior GMM residual requires --gmm-components >= 2",
+        )
+
     def test_report_to_none_becomes_empty_reporter_list(self):
         args = parse_and_validate(
             ["xlmroberta-base", "mse", "--report-to", "none"]
@@ -226,6 +266,37 @@ class TrainCliValidationTest(unittest.TestCase):
                     "et_model_type": "et2",
                 },
             )
+
+    def test_advanced_factory_transplants_one_full_baseline_model(self):
+        baseline_model = object()
+        expected_model = object()
+        with patch(
+            "va_gaze.train.fold_runner._build_baseline_model",
+            return_value=baseline_model,
+        ) as build_baseline, patch(
+            "va_gaze.train.fold_runner.GazeFusionForSequenceRegression.from_baseline_model",
+            return_value=expected_model,
+        ) as transplant:
+            actual_model = _build_model(
+                "distilbert",
+                "unused",
+                object(),
+                {
+                    "gaze_fusion": "conditioned-pooling",
+                    "et_model_type": "heuristic",
+                },
+            )
+
+        self.assertIs(actual_model, expected_model)
+        build_baseline.assert_called_once_with("distilbert", "unused", 2)
+        self.assertIs(
+            transplant.call_args.kwargs["baseline_model"],
+            baseline_model,
+        )
+        self.assertEqual(
+            transplant.call_args.kwargs["fusion_strategy"],
+            "conditioned-pooling",
+        )
 
 
 class FoldRunnerContractTest(unittest.TestCase):

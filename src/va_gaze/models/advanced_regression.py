@@ -10,6 +10,7 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from va_gaze.models.gaze.fusion import FUSION_ALIASES, build_gaze_fusion
 from va_gaze.models.gaze.objectives import MaskedGazePrediction, TokenInfoNCEAlignment
 from va_gaze.models.gaze.provider import GazeFeatureProvider
+from va_gaze.models.gaze.simple_gmm import GmmArousalLogitResidual
 
 
 CANONICAL_ADVANCED_GAZE_FUSIONS = (
@@ -17,6 +18,7 @@ CANONICAL_ADVANCED_GAZE_FUSIONS = (
     "postencoder-cls-attention-bias",
     "cross-attention",
     "gmm-dual-gate-pooling",
+    "gmm-arousal-residual",
 )
 ADVANCED_GAZE_FUSIONS = (
     *CANONICAL_ADVANCED_GAZE_FUSIONS,
@@ -63,7 +65,21 @@ class DistilBertVARegressionHead(nn.Module):
         self.classifier = nn.Linear(hidden_size, output_dim)
         self.output_dim = int(output_dim)
 
-    def forward(self, representation):
+    @classmethod
+    def from_baseline_model(cls, baseline_model):
+        """Transplant the exact DistilBERT classification-head modules."""
+
+        head = cls.__new__(cls)
+        nn.Module.__init__(head)
+        head.pre_classifier = baseline_model.pre_classifier
+        head.dropout = baseline_model.dropout
+        head.classifier = baseline_model.classifier
+        head.output_dim = int(head.classifier.out_features)
+        return head
+
+    def raw_logits(self, representation):
+        """Return unformatted logits from a CLS or task-specific representation."""
+
         hidden = self.pre_classifier(representation)
         hidden = torch.relu(hidden)
         hidden = self.dropout(hidden)
@@ -75,7 +91,15 @@ class DistilBertVARegressionHead(nn.Module):
                 logits = logits + self.classifier.bias
         else:
             logits = self.classifier(hidden)
+        return logits
+
+    def format_logits(self, logits):
+        """Apply the baseline VA output transform to raw logits."""
+
         return _format_regression_logits(logits, self.output_dim)
+
+    def forward(self, representation):
+        return self.format_logits(self.raw_logits(representation))
 
 
 class RobertaVARegressionHead(nn.Module):
@@ -90,7 +114,21 @@ class RobertaVARegressionHead(nn.Module):
         self.out_proj = nn.Linear(hidden_size, output_dim)
         self.output_dim = int(output_dim)
 
-    def forward(self, representation):
+    @classmethod
+    def from_baseline_model(cls, baseline_model):
+        """Transplant the exact RoBERTa/XLM-R classification-head modules."""
+
+        head = cls.__new__(cls)
+        nn.Module.__init__(head)
+        head.dropout = baseline_model.classifier.dropout
+        head.dense = baseline_model.classifier.dense
+        head.out_proj = baseline_model.classifier.out_proj
+        head.output_dim = int(head.out_proj.out_features)
+        return head
+
+    def raw_logits(self, representation):
+        """Return unformatted logits from a CLS or task-specific representation."""
+
         hidden = self.dropout(representation)
         hidden = self.dense(hidden)
         hidden = torch.tanh(hidden)
@@ -103,7 +141,15 @@ class RobertaVARegressionHead(nn.Module):
                 logits = logits + self.out_proj.bias
         else:
             logits = self.out_proj(hidden)
+        return logits
+
+    def format_logits(self, logits):
+        """Apply the baseline VA output transform to raw logits."""
+
         return _format_regression_logits(logits, self.output_dim)
+
+    def forward(self, representation):
+        return self.format_logits(self.raw_logits(representation))
 
 
 def _classifier_dropout(config, family):
@@ -180,10 +226,13 @@ class GazeFusionForSequenceRegression(nn.Module):
         gaze_alignment_max_tokens=512,
         gmm_temperature=1.0,
         gmm_nll_weight=0.01,
+        gmm_residual_mode="component-linear",
+        gmm_residual_l2=1e-4,
         gaze_target_transform="signed-log1p",
         gaze_target_mean=None,
         gaze_target_scale=None,
         encoder=None,
+        regression_head=None,
     ):
         super().__init__()
         if encoder is None:
@@ -205,8 +254,13 @@ class GazeFusionForSequenceRegression(nn.Module):
         self.fusion_strategy = normalize_advanced_fusion(fusion_strategy)
         if self.fusion_strategy not in (*CANONICAL_ADVANCED_GAZE_FUSIONS, "none"):
             raise ValueError(f"Unknown advanced gaze fusion: {fusion_strategy}")
-        if self.fusion_strategy == "gmm-dual-gate-pooling" and self.output_dim != 2:
-            raise ValueError("gmm-dual-gate-pooling currently supports two-output VA regression only.")
+        if self.fusion_strategy in (
+            "gmm-dual-gate-pooling",
+            "gmm-arousal-residual",
+        ) and self.output_dim != 2:
+            raise ValueError(
+                f"{self.fusion_strategy} currently supports two-output VA regression only."
+            )
 
         self.gaze_aux_weight = float(gaze_aux_weight)
         self.gaze_alignment_weight = float(gaze_alignment_weight)
@@ -225,22 +279,33 @@ class GazeFusionForSequenceRegression(nn.Module):
         )
 
         max_positions = int(getattr(self.config, "max_position_embeddings", 1024))
-        self.fusion = build_gaze_fusion(
-            strategy=self.fusion_strategy,
-            hidden_size=self.hidden_size,
-            gaze_dim=self.gaze_provider.feature_dim,
-            gaze_hidden_size=gaze_hidden_size,
-            num_heads=gaze_num_heads,
-            num_layers=gaze_num_layers,
-            max_positions=max_positions,
-            gate_init=gaze_gate_init,
-            dropout=gaze_fusion_dropout,
-            attention_scale=gaze_attention_scale,
-            train_attention_scale=train_gaze_attention_scale,
-            gmm_components=gmm_components,
-            gmm_temperature=gmm_temperature,
-            gmm_nll_weight=gmm_nll_weight,
-        )
+        self.gmm_residual_l2 = float(gmm_residual_l2)
+        self.gmm_residual = None
+        if self.fusion_strategy == "gmm-arousal-residual":
+            self.fusion = None
+            self.gmm_residual = GmmArousalLogitResidual(
+                feature_dim=self.gaze_provider.feature_dim,
+                n_components=gmm_components,
+                mode=gmm_residual_mode,
+                arousal_index=1,
+            )
+        else:
+            self.fusion = build_gaze_fusion(
+                strategy=self.fusion_strategy,
+                hidden_size=self.hidden_size,
+                gaze_dim=self.gaze_provider.feature_dim,
+                gaze_hidden_size=gaze_hidden_size,
+                num_heads=gaze_num_heads,
+                num_layers=gaze_num_layers,
+                max_positions=max_positions,
+                gate_init=gaze_gate_init,
+                dropout=gaze_fusion_dropout,
+                attention_scale=gaze_attention_scale,
+                train_attention_scale=train_gaze_attention_scale,
+                gmm_components=gmm_components,
+                gmm_temperature=gmm_temperature,
+                gmm_nll_weight=gmm_nll_weight,
+            )
 
         self.gaze_prediction = None
         if self.gaze_aux_weight > 0:
@@ -263,7 +328,13 @@ class GazeFusionForSequenceRegression(nn.Module):
                 max_tokens=gaze_alignment_max_tokens,
             )
 
-        self.regression_head = _build_regression_head(self.config, self.output_dim)
+        if regression_head is None:
+            regression_head = _build_regression_head(self.config, self.output_dim)
+        if int(getattr(regression_head, "output_dim", -1)) != self.output_dim:
+            raise ValueError(
+                "The supplied regression head output dimension does not match output_dim."
+            )
+        self.regression_head = regression_head
         self._architecture_kwargs = {
             "fusion_strategy": self.fusion_strategy,
             "et2_checkpoint_path": _json_path(et2_checkpoint_path),
@@ -292,14 +363,66 @@ class GazeFusionForSequenceRegression(nn.Module):
             "gaze_alignment_max_tokens": int(gaze_alignment_max_tokens),
             "gmm_temperature": float(gmm_temperature),
             "gmm_nll_weight": float(gmm_nll_weight),
+            "gmm_residual_mode": str(gmm_residual_mode),
+            "gmm_residual_l2": self.gmm_residual_l2,
             "gaze_target_transform": gaze_target_transform,
             "gaze_target_mean": _json_vector(gaze_target_mean),
             "gaze_target_scale": _json_vector(gaze_target_scale),
         }
 
+    @classmethod
+    def from_baseline_model(cls, baseline_model, tokenizer, **architecture_kwargs):
+        """Build gaze fusion by transplanting one complete baseline encoder and head."""
+
+        if "encoder" in architecture_kwargs or "regression_head" in architecture_kwargs:
+            raise TypeError(
+                "from_baseline_model manages encoder and regression_head internally."
+            )
+
+        model_type = str(getattr(baseline_model.config, "model_type", ""))
+        if model_type == "distilbert":
+            encoder = getattr(baseline_model, "distilbert", None)
+            regression_head = DistilBertVARegressionHead.from_baseline_model(
+                baseline_model
+            )
+        elif model_type in ("roberta", "xlm-roberta"):
+            encoder = getattr(baseline_model, "roberta", None)
+            regression_head = RobertaVARegressionHead.from_baseline_model(
+                baseline_model
+            )
+        else:
+            raise ValueError(
+                "Baseline transplantation supports DistilBERT, RoBERTa, and XLM-R only."
+            )
+        if encoder is None:
+            raise ValueError(f"Baseline model does not expose its {model_type} encoder.")
+
+        requested_output_dim = int(
+            architecture_kwargs.pop("output_dim", regression_head.output_dim)
+        )
+        if requested_output_dim != regression_head.output_dim:
+            raise ValueError(
+                "Baseline classification head output dimension does not match output_dim."
+            )
+        return cls(
+            checkpoint=None,
+            tokenizer=tokenizer,
+            encoder=encoder,
+            regression_head=regression_head,
+            output_dim=requested_output_dim,
+            **architecture_kwargs,
+        )
+
     @property
     def has_training_objective(self):
         return self.gaze_prediction is not None or self.gaze_alignment is not None
+
+    def gaze_residual_parameters(self):
+        """Expose only the small GMM residual coefficients to the trainer."""
+
+        if self.gmm_residual is None:
+            return ()
+        return tuple(self.gmm_residual.correction.parameters())
 
     def _save_bundle_assets(self, output_dir):
         encoder_config_dir = output_dir / "encoder_config"
@@ -529,7 +652,27 @@ class GazeFusionForSequenceRegression(nn.Module):
             )
 
         fusion_auxiliary_loss = None
-        if gaze_batch is not None and needs_primary_gaze:
+        raw_logits = None
+        if (
+            gaze_batch is not None
+            and self.fusion_strategy == "gmm-arousal-residual"
+        ):
+            summaries, has_gaze = self.gmm_residual.summarize_token_features(
+                gaze_batch.features,
+                gaze_batch.valid_mask,
+            )
+            raw_logits = self.regression_head.raw_logits(cls_state)
+            raw_logits = self.gmm_residual(
+                raw_logits,
+                summaries,
+                has_gaze=has_gaze,
+            )
+            representation = cls_state
+            if self.training and self.gmm_residual_l2 > 0:
+                fusion_auxiliary_loss = self.gmm_residual_l2 * torch.square(
+                    self.gmm_residual.correction.weight
+                ).sum()
+        elif gaze_batch is not None and needs_primary_gaze:
             fusion_output = self.fusion(cls_state, text_states, gaze_batch)
             if isinstance(fusion_output, tuple):
                 representation, fusion_auxiliary_loss = fusion_output
@@ -537,7 +680,11 @@ class GazeFusionForSequenceRegression(nn.Module):
                 representation = fusion_output
         else:
             representation = cls_state
-        logits = self.regression_head(representation)
+        logits = (
+            self.regression_head.format_logits(raw_logits)
+            if raw_logits is not None
+            else self.regression_head(representation)
+        )
 
         auxiliary_loss = None
         if self.training and gaze_batch is not None:

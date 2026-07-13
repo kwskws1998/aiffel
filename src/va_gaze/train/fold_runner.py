@@ -13,6 +13,7 @@ from va_gaze.train.custom_trainer import (
     CustomTrainerRobust,
     CustomTrainerRobustCCC,
 )
+from va_gaze.train.gmm_fit import fit_train_fold_gmm_residual
 from va_gaze.eval.metrics import compute_metrics
 from va_gaze.models.advanced_regression import (
     CANONICAL_ADVANCED_GAZE_FUSIONS,
@@ -61,6 +62,32 @@ def _select_batch_size(model_name, params):
         return params["batch_size_xlmrB"]
     if model_name == "xlmroberta-large":
         return params["batch_size_xlmrL"]
+    raise ValueError(f"Unknown model name: {model_name}")
+
+
+def _build_baseline_model(model_name, checkpoint, output_dim):
+    """Construct the exact full text-only baseline selected for the experiment."""
+
+    if model_name == "distilbert":
+        if output_dim > 2:
+            return DistilBertForSequenceClassificationHeteroscedastic.from_pretrained(
+                checkpoint,
+                num_labels=output_dim,
+            )
+        return DistilBertForSequenceClassificationSig.from_pretrained(
+            checkpoint,
+            num_labels=2,
+        )
+    if model_name in ("xlmroberta-base", "xlmroberta-large"):
+        if output_dim > 2:
+            return XLMRobertaForSequenceClassificationHeteroscedastic.from_pretrained(
+                checkpoint,
+                num_labels=output_dim,
+            )
+        return XLMRobertaForSequenceClassificationSig.from_pretrained(
+            checkpoint,
+            num_labels=2,
+        )
     raise ValueError(f"Unknown model name: {model_name}")
 
 
@@ -113,8 +140,9 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
             if normalized_advanced_fusion in CANONICAL_ADVANCED_GAZE_FUSIONS
             else "none"
         )
-        return GazeFusionForSequenceRegression(
-            checkpoint=checkpoint,
+        baseline_model = _build_baseline_model(model_name, checkpoint, output_dim)
+        return GazeFusionForSequenceRegression.from_baseline_model(
+            baseline_model=baseline_model,
             tokenizer=tokenizer,
             fusion_strategy=fusion_strategy,
             gaze_aux_weight=gaze_aux_weight,
@@ -137,6 +165,10 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
             ),
             gmm_temperature=gaze_config.get("gmm_temperature", 1.0),
             gmm_nll_weight=gaze_config.get("gmm_nll_weight", 0.01),
+            gmm_residual_mode=gaze_config.get(
+                "gmm_residual_mode", "component-linear"
+            ),
+            gmm_residual_l2=gaze_config.get("gmm_residual_l2", 1e-4),
             **shared_gaze_kwargs,
         )
 
@@ -177,21 +209,7 @@ def _build_model(model_name, checkpoint, tokenizer, gaze_config, output_dim=2):
             **shared_gaze_kwargs,
         )
 
-    if model_name == "distilbert":
-        if output_dim > 2:
-            return DistilBertForSequenceClassificationHeteroscedastic.from_pretrained(
-                checkpoint,
-                num_labels=output_dim,
-            )
-        return DistilBertForSequenceClassificationSig.from_pretrained(checkpoint, num_labels=2)
-    if model_name in ("xlmroberta-base", "xlmroberta-large"):
-        if output_dim > 2:
-            return XLMRobertaForSequenceClassificationHeteroscedastic.from_pretrained(
-                checkpoint,
-                num_labels=output_dim,
-            )
-        return XLMRobertaForSequenceClassificationSig.from_pretrained(checkpoint, num_labels=2)
-    raise ValueError(f"Unknown model name: {model_name}")
+    return _build_baseline_model(model_name, checkpoint, output_dim)
 
 
 def _build_training_args(output_dir, logging_dir, batch_size, params):
@@ -233,6 +251,8 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data, params
     if trainer_cls is None:
         raise ValueError(f"Unknown loss name: {loss_name}")
     trainer_kwargs = {}
+    if params.get("gaze_learning_rate") is not None:
+        trainer_kwargs["gaze_learning_rate"] = params["gaze_learning_rate"]
     if loss_name == "hetero":
         trainer_kwargs.update(
             {
@@ -311,6 +331,19 @@ def run_fold(
         gaze_config,
         output_dim=output_dim,
     )
+    if getattr(model, "fusion_strategy", None) == "gmm-arousal-residual":
+        fit_train_fold_gmm_residual(
+            model=model,
+            train_data=train_data,
+            fold_id=fold_id,
+            output_dir=preds_dir,
+            random_state=params.get("seed", 42) + int(fold_id),
+            max_examples=gaze_config.get("gmm_fit_max_examples", 5000),
+            max_tokens=gaze_config.get("gmm_fit_max_tokens", 50000),
+            reg_covar=gaze_config.get("gmm_reg_covar", 1e-4),
+            n_init=gaze_config.get("gmm_n_init", 5),
+        )
+    set_seed(params.get("seed", 42))
     training_args = _build_training_args(output_dir, logging_dir, batch_size, params)
     trainer = _build_trainer(loss_name, model, training_args, train_data, val_data, params)
 
