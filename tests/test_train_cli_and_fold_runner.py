@@ -566,7 +566,7 @@ class FoldRunnerContractTest(unittest.TestCase):
                         side_effect=lambda *args, **kwargs: events.append("build") or object(),
                     )
                 )
-                stack.enter_context(
+                build_training_args = stack.enter_context(
                     patch(
                         "va_gaze.train.fold_runner._build_training_args",
                         return_value=object(),
@@ -598,9 +598,14 @@ class FoldRunnerContractTest(unittest.TestCase):
                 ("predict", ("hidden_states", "attentions")),
                 events,
             )
+            self.assertEqual(
+                build_training_args.call_args.args[1],
+                "logs/test/fold1",
+            )
             prediction_path = Path(temp_dir) / "predictions.csv"
             self.assertTrue(prediction_path.is_file())
             self.assertEqual(np.loadtxt(prediction_path, delimiter=",", skiprows=1).shape, (2, 3))
+            self.assertEqual(list(Path(temp_dir).glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

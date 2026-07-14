@@ -1,4 +1,5 @@
 import inspect
+import os
 from functools import partial
 
 import numpy as np
@@ -67,6 +68,32 @@ OBJECTIVE_INCOMPATIBLE_GAZE_FUSIONS = {
     "gmm-adapter",
     "summary",
 }
+
+
+def _atomic_write_dataframe_csv(dataframe, path):
+    """Publish a CSV only after the complete temporary file has been written."""
+
+    temporary_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        dataframe.to_csv(temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def _atomic_write_metric_items(metrics, path):
+    """Publish fold metrics atomically for concurrent fold execution."""
+
+    temporary_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w") as output_file:
+            for key, value in metrics.items():
+                output_file.write(f"{key},{value}\n")
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 def _select_batch_size(model_name, params):
@@ -402,7 +429,7 @@ def run_fold(
     gaze_config = gaze_config or {}
     output_dir = f"Output Directory/{timestamp}/fold{fold_id}"
     model_dir = f"model/{timestamp}/fold{fold_id}"
-    logging_dir = f"logs/logs{fold_id}"
+    logging_dir = f"logs/{timestamp}/fold{fold_id}"
     batch_size = _select_batch_size(model_name, params)
 
     output_dim = 4 if loss_name in HETEROSCEDASTIC_LOSSES else 2
@@ -439,10 +466,14 @@ def run_fold(
     )
     prediction_array = _validate_prediction_array(predictions.predictions, output_dim)
 
-    pd.DataFrame(prediction_array).to_csv(f"{preds_dir}/{prediction_filename}")
-    with open(f"{preds_dir}/{metrics_filename}", "w") as output_file:
-        for key, value in predictions.metrics.items():
-            output_file.write(f"{key},{value}\n")
+    _atomic_write_dataframe_csv(
+        pd.DataFrame(prediction_array),
+        f"{preds_dir}/{prediction_filename}",
+    )
+    _atomic_write_metric_items(
+        predictions.metrics,
+        f"{preds_dir}/{metrics_filename}",
+    )
 
     if params.get("save_final_model", True):
         trainer.save_model(model_dir)

@@ -473,6 +473,28 @@ Blackwell GPUs, the ET2 checkpoint, and both no-IEMOCAP fold files. Full
 XLM-R-large postfix runs at batch 16 should use both `--bf16` and
 `--gradient-checkpointing`.
 
+Launch two seeds (`42`, `43`) and their two folds across GPUs `0-3` in one
+four-pane tmux session with:
+
+```bash
+conda activate va_gaze
+bash scripts/run_xlmr_hetero_4gpu_tmux.sh
+```
+
+The runner uses XLM-R-large, ET2 TRT-only postfix concat, no-IEMOCAP data,
+`hetero+ccc`, batch size 16, and ten epochs. It selects each fold checkpoint by
+maximum full-held-out-fold `ccc_mean`, keeps one checkpoint per fold, reloads
+that checkpoint, writes the held-out predictions, saves the final fold model,
+and creates the combined OOF and uncertainty reports when both folds of a seed
+are complete. Terminal output remains visible in tmux and is also copied to
+`logs/<session>/gpu*.log`. Use `Ctrl-b d` to detach and run
+`tmux attach -t <session>` to return. Inspect the exact four commands without
+starting training with:
+
+```bash
+DRY_RUN=1 bash scripts/run_xlmr_hetero_4gpu_tmux.sh
+```
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**
