@@ -200,6 +200,9 @@ def _build_parser():
     parser.add_argument("--hetero-logvar-max", type=float, default=3.0)
     parser.add_argument("--optim", type=str, default="adamw_torch")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fold", choices=["all", "1", "2"], default="all")
     parser.add_argument(
@@ -260,6 +263,8 @@ def _validate_args(parser, args):
             _validate_positive_int("batch_size_xlmrB", args.batch_size_xlmrB)
         if args.batch_size_xlmrL is not None:
             _validate_positive_int("batch_size_xlmrL", args.batch_size_xlmrL)
+        if args.bf16 and args.fp16:
+            raise ValueError("Choose only one of --bf16 or --fp16.")
         if args.run_id is not None:
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id) is None:
                 raise ValueError(
@@ -654,6 +659,9 @@ def main():
         "hetero_logvar_max": args.hetero_logvar_max,
         "optim": args.optim,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "bf16": args.bf16,
+        "fp16": args.fp16,
+        "gradient_checkpointing": args.gradient_checkpointing,
         "seed": args.seed,
         "maxlen": args.maxlen,
         "save_strategy": args.save_strategy,

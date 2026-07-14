@@ -104,6 +104,25 @@ DATA_ZIP_FILE_ID="1xXM32nva_4I3EAVAOrQ84L16f-LjsJbj" \
 DATA_ZIP_SHA256="5db750ededfd9717dcca465b34fd7e6c348e50e563ad2c0814c458b04441e81d" \
 bash scripts/setup_distilbert_conda_cloud.sh
 
+Four RTX 5090 GPUs with Conda, CUDA 12.8 PyTorch, ET2, and no-IEMOCAP data:
+bash scripts/setup_xlmr_5090_conda_cloud.sh
+
+The RTX 5090 script uses PyTorch 2.7.1 with the official cu128 wheel because
+the general torch==2.2.2/cu121 environment does not support Blackwell sm_120.
+It verifies four GPUs and preloads xlm-roberta-large and roberta-base once
+before the four fold processes start.
+
+For two seeds with one fold per GPU, use this assignment:
+- GPU 0: seed 42, fold 1
+- GPU 1: seed 42, fold 2
+- GPU 2: seed 43, fold 1
+- GPU 3: seed 43, fold 2
+
+Use the same --run-id and --preds-dir within a seed, and different values
+between seeds. For XLM-R-large postfix batch 16 on RTX 5090, include:
+  --batch-size 16 --gradient-accumulation-steps 1 \
+  --bf16 --gradient-checkpointing
+
 Do not set SKIP_DEPS=1 yourself on a fresh Conda environment. The cloud script
 installs numpy, pandas, PyTorch, Transformers, gdown, and the remaining pinned
 requirements before calling install.sh.

@@ -460,6 +460,19 @@ model/xlmr_large_parallel_s42/fold2/
 Preds/xlmr_large_parallel_s42/
 ```
 
+For a four-RTX-5090 cloud node, create the CUDA 12.8 Conda environment, ET2
+checkpoint, no-IEMOCAP data, and XLM-R/ET2 model cache with:
+
+```bash
+bash scripts/setup_xlmr_5090_conda_cloud.sh
+```
+
+The script installs the official PyTorch 2.7.1 CUDA 12.8 wheel rather than the
+repository's older general-purpose PyTorch pin. It verifies four visible
+Blackwell GPUs, the ET2 checkpoint, and both no-IEMOCAP fold files. Full
+XLM-R-large postfix runs at batch 16 should use both `--bf16` and
+`--gradient-checkpointing`.
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**

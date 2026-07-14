@@ -7,6 +7,7 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 from transformers.modeling_outputs import SequenceClassifierOutput
 
+from va_gaze.models.checkpointing import EncoderGradientCheckpointingMixin
 from va_gaze.models.gaze.fusion import FUSION_ALIASES, build_gaze_fusion
 from va_gaze.models.gaze.objectives import MaskedGazePrediction, TokenInfoNCEAlignment
 from va_gaze.models.gaze.provider import GazeFeatureProvider
@@ -190,7 +191,7 @@ def _build_regression_head(config, output_dim):
     return head
 
 
-class GazeFusionForSequenceRegression(nn.Module):
+class GazeFusionForSequenceRegression(EncoderGradientCheckpointingMixin, nn.Module):
     """Orchestrate post-encoder gaze fusion and training-only gaze objectives."""
 
     supports_gaze_auxiliary_loss = True

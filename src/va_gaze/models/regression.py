@@ -11,6 +11,7 @@ from transformers.models.roberta.modeling_roberta import (
 )
 from transformers.models.xlm_roberta.configuration_xlm_roberta import XLMRobertaConfig
 
+from va_gaze.models.checkpointing import EncoderGradientCheckpointingMixin
 from va_gaze.models.gaze.concat import (
     POSTFIX_CONCAT,
     compose_gaze_concat_inputs,
@@ -172,7 +173,7 @@ class XLMRobertaForSequenceClassificationHeteroscedastic(
     config_class = XLMRobertaConfig
 
 
-class GazeConcatForSequenceRegression(nn.Module):
+class GazeConcatForSequenceRegression(EncoderGradientCheckpointingMixin, nn.Module):
     def __init__(
         self,
         checkpoint,

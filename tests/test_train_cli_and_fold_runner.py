@@ -20,6 +20,7 @@ from va_gaze.cli.train_model import (
 )
 from va_gaze.train.fold_runner import (
     _build_model,
+    _build_training_args,
     _validate_prediction_array,
     run_fold,
 )
@@ -212,6 +213,23 @@ class TrainCliValidationTest(unittest.TestCase):
             "run_id must contain only letters, digits, dots, underscores, or hyphens",
         )
 
+    def test_mixed_precision_and_gradient_checkpointing_flags(self):
+        args = parse_and_validate(
+            [
+                "xlmroberta-large",
+                "mse",
+                "--bf16",
+                "--gradient-checkpointing",
+            ]
+        )
+        self.assertTrue(args.bf16)
+        self.assertFalse(args.fp16)
+        self.assertTrue(args.gradient_checkpointing)
+        self.assert_cli_error(
+            ["--bf16", "--fp16"],
+            "Choose only one of --bf16 or --fp16",
+        )
+
     def test_emotion_trt_alias_requires_trt_only_when_gaze_is_enabled(self):
         args = parse_and_validate(
             [
@@ -381,6 +399,36 @@ class ParallelFoldExecutionTest(unittest.TestCase):
 
 
 class FoldRunnerContractTest(unittest.TestCase):
+    def test_training_arguments_receive_memory_optimization_flags(self):
+        captured = {}
+
+        class FakeTrainingArguments:
+            def __init__(self, evaluation_strategy=None, **kwargs):
+                captured.update(kwargs)
+                captured["evaluation_strategy"] = evaluation_strategy
+
+        params = {
+            "train_epochs": 10,
+            "lr": 6e-6,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.1,
+            "bf16": True,
+            "fp16": False,
+            "gradient_checkpointing": True,
+        }
+        with patch("va_gaze.train.fold_runner.TrainingArguments", FakeTrainingArguments):
+            _build_training_args("output", "logs", 16, params)
+
+        self.assertTrue(captured["bf16"])
+        self.assertFalse(captured["fp16"])
+        self.assertTrue(captured["gradient_checkpointing"])
+        self.assertEqual(
+            captured["gradient_checkpointing_kwargs"],
+            {"use_reentrant": False},
+        )
+        self.assertEqual(captured["per_device_train_batch_size"], 16)
+        self.assertEqual(captured["evaluation_strategy"], "epoch")
+
     def test_prediction_array_contract(self):
         expected = np.zeros((3, 2), dtype=np.float32)
         self.assertIs(_validate_prediction_array(expected, 2), expected)

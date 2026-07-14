@@ -230,6 +230,9 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
         "weight_decay": params["weight_decay"],
         "optim": params.get("optim", "adamw_torch"),
         "gradient_accumulation_steps": params.get("gradient_accumulation_steps", 1),
+        "bf16": bool(params.get("bf16", False)),
+        "fp16": bool(params.get("fp16", False)),
+        "gradient_checkpointing": bool(params.get("gradient_checkpointing", False)),
         "seed": params.get("seed", 42),
         "group_by_length": True,
         "save_strategy": save_strategy,
@@ -238,6 +241,8 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
         "warmup_ratio": params["warmup_ratio"],
         "dataloader_pin_memory": torch.cuda.is_available(),
     }
+    if params.get("gradient_checkpointing", False):
+        training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
     if params.get("report_to") is not None:
         training_kwargs["report_to"] = params["report_to"]
     argument_names = inspect.signature(TrainingArguments.__init__).parameters
