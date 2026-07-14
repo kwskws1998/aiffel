@@ -12,7 +12,10 @@ from transformers import TrainingArguments
 from va_gaze.models.gaze.simple_gmm import GmmArousalLogitResidual
 from va_gaze.models.gaze.types import GazeBatch
 from va_gaze.train.custom_trainer import VARegressionTrainer
-from va_gaze.train.gmm_fit import fit_train_fold_gmm_residual
+from va_gaze.train.gmm_fit import (
+    collect_train_fold_gaze_summaries,
+    fit_train_fold_gmm_residual,
+)
 
 
 class TinyGazeDataset:
@@ -47,6 +50,18 @@ class DeterministicGazeProvider:
         )
 
 
+class BFloat16GazeProvider(DeterministicGazeProvider):
+    """Exercise the NumPy boundary with reduced-precision gaze summaries."""
+
+    def compute(self, input_ids, attention_mask):
+        gaze_batch = super().compute(input_ids, attention_mask)
+        return GazeBatch(
+            features=gaze_batch.features.to(dtype=torch.bfloat16),
+            mapped_mask=gaze_batch.mapped_mask,
+            text_mask=gaze_batch.text_mask,
+        )
+
+
 class OptimizerProbe(torch.nn.Module):
     """Expose one residual parameter separately from an ordinary base layer."""
 
@@ -60,6 +75,29 @@ class OptimizerProbe(torch.nn.Module):
 
 
 class GmmFitAndOptimizerTest(unittest.TestCase):
+    def test_bfloat16_gaze_summaries_are_converted_to_float32_numpy(self):
+        residual = GmmArousalLogitResidual(
+            feature_dim=5,
+            n_components=2,
+            mode="component-linear",
+        )
+        model = SimpleNamespace(
+            gmm_residual=residual,
+            gaze_provider=BFloat16GazeProvider(),
+        )
+
+        summaries, collection = collect_train_fold_gaze_summaries(
+            model=model,
+            train_data=TinyGazeDataset(size=3),
+            max_examples=3,
+            max_tokens=100,
+            random_state=13,
+        )
+
+        self.assertEqual(summaries.shape, (3, 5))
+        self.assertEqual(summaries.dtype, "float32")
+        self.assertEqual(collection["fitted_examples"], 3)
+
     def test_fold_fit_installs_gmm_and_writes_diagnostics(self):
         residual = GmmArousalLogitResidual(
             feature_dim=5,

@@ -131,7 +131,12 @@ class FixationsPredictor_2:
             predict_mask = attn_mask.clone()
             with torch.no_grad():
                 pred = self.model(input_ids, attn_mask, predict_mask)
-            return pred.squeeze(0).cpu().numpy()
+            return (
+                pred.squeeze(0)
+                .detach()
+                .to(device="cpu", dtype=torch.float32)
+                .numpy()
+            )
 
         preds = np.zeros((seq_len, 5), dtype=np.float32)
         weights = np.zeros(seq_len, dtype=np.float32)
@@ -154,7 +159,12 @@ class FixationsPredictor_2:
 
             with torch.no_grad():
                 pred_win = self.model(ids_win, mask_win, mask_win.clone())
-            pred_np = pred_win.squeeze(0).cpu().numpy()
+            pred_np = (
+                pred_win.squeeze(0)
+                .detach()
+                .to(device="cpu", dtype=torch.float32)
+                .numpy()
+            )
 
             for fi in range(5):
                 preds[start:end, fi] += pred_np[:, fi] * linear_w

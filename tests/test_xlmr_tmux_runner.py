@@ -43,8 +43,11 @@ class XlmrTmuxRunnerTest(unittest.TestCase):
         self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
         self.assertIn("tmux layout: one pane with four prefixed workers", dry_run.stdout)
         self.assertIn("HF_HUB_OFFLINE=1", dry_run.stdout)
+        self.assertIn("HF_HUB_DISABLE_XET=1", dry_run.stdout)
         self.assertIn("Single-pane supervisor command:", dry_run.stdout)
-        self.assertNotIn("split-window", RUNNER.read_text(encoding="utf-8"))
+        runner_source = RUNNER.read_text(encoding="utf-8")
+        self.assertNotIn("split-window", runner_source)
+        self.assertIn("et2_bfloat16_numpy_preflight=ok", runner_source)
 
     def test_supervisor_preserves_each_failed_worker_exit_code(self):
         with tempfile.TemporaryDirectory() as temp_dir:

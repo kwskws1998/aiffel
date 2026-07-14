@@ -136,7 +136,13 @@ class EmotionEtFixationsPredictor:
 
         with torch.no_grad():
             token_preds = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        token_preds = token_preds.squeeze(0).clamp_min(0.0).detach().cpu().numpy()
+        token_preds = (
+            token_preds.squeeze(0)
+            .clamp_min(0.0)
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+            .numpy()
+        )
 
         native_features = np.zeros((len(words), self.native_feature_dim), dtype=np.float32)
         seen = set()

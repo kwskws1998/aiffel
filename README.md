@@ -488,7 +488,9 @@ that checkpoint, writes the held-out predictions, saves the final fold model,
 and creates the combined OOF and uncertainty reports when both folds of a seed
 are complete. Before starting the four workers, it downloads and validates
 XLM-R-large and RoBERTa-base once; the workers then use the completed cache in
-offline mode so concurrent first-run downloads cannot corrupt a snapshot.
+offline mode so concurrent first-run downloads cannot corrupt a snapshot. The
+runner disables the Xet download path by default and verifies the ET2 BF16-to-
+NumPy boundary before creating the tmux session.
 All four streams remain visible in the same pane with GPU, seed, train-fold,
 and test-fold prefixes. Output is copied to `logs/<session>/combined.log` and
 four separate `gpu*.log` files. Use `Ctrl-b d` to detach and run

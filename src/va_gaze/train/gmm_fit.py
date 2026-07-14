@@ -60,7 +60,12 @@ def collect_train_fold_gaze_summaries(
             token_count = int(gaze_batch.valid_mask.sum().item())
             examined_examples += 1
             if bool(has_gaze.item()):
-                summaries.append(summary.squeeze(0).cpu().numpy())
+                summaries.append(
+                    summary.squeeze(0)
+                    .detach()
+                    .to(device="cpu", dtype=torch.float32)
+                    .numpy()
+                )
                 valid_tokens += token_count
             else:
                 missing_examples += 1

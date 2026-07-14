@@ -22,6 +22,7 @@ usage() {
     "  HETERO_MSE_WEIGHT=0.1 HETERO_CCC_WEIGHT=0.1" \
     "  MIN_FREE_GB=60 MIN_GPU_FREE_MIB=28000" \
     "  PRELOAD_MODELS=1 HF_HUB_DOWNLOAD_TIMEOUT=600" \
+    "  HF_HUB_DISABLE_XET=1" \
     "  REPORT_TO=none ATTACH=1 DRY_RUN=0" \
     "" \
     "Examples:" \
@@ -98,6 +99,7 @@ prepare_worker_command() {
     TOKENIZERS_PARALLELISM=false
     HF_HUB_OFFLINE=1
     TRANSFORMERS_OFFLINE=1
+    "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET"
     "HF_HUB_DOWNLOAD_TIMEOUT=$HF_HUB_DOWNLOAD_TIMEOUT"
     "HF_HUB_ETAG_TIMEOUT=$HF_HUB_ETAG_TIMEOUT"
     "CUDA_VISIBLE_DEVICES=$gpu"
@@ -235,6 +237,7 @@ preload_models() {
   env \
     HF_HUB_OFFLINE=0 \
     TRANSFORMERS_OFFLINE=0 \
+    "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET" \
     "HF_HUB_DOWNLOAD_TIMEOUT=$HF_HUB_DOWNLOAD_TIMEOUT" \
     "HF_HUB_ETAG_TIMEOUT=$HF_HUB_ETAG_TIMEOUT" \
     "$PYTHON_BIN" - <<'PY'
@@ -381,6 +384,7 @@ build_supervisor_command() {
     "HETERO_LOGVAR_MIN=$HETERO_LOGVAR_MIN"
     "HETERO_LOGVAR_MAX=$HETERO_LOGVAR_MAX"
     "PRELOAD_MODELS=$PRELOAD_MODELS"
+    "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET"
     "HF_HUB_DOWNLOAD_TIMEOUT=$HF_HUB_DOWNLOAD_TIMEOUT"
     "HF_HUB_ETAG_TIMEOUT=$HF_HUB_ETAG_TIMEOUT"
     "REPORT_TO=$REPORT_TO"
@@ -428,6 +432,7 @@ HETERO_LOGVAR_MAX="${HETERO_LOGVAR_MAX:-3}"
 MIN_FREE_GB="${MIN_FREE_GB:-60}"
 MIN_GPU_FREE_MIB="${MIN_GPU_FREE_MIB:-28000}"
 PRELOAD_MODELS="${PRELOAD_MODELS:-1}"
+HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-600}"
 HF_HUB_ETAG_TIMEOUT="${HF_HUB_ETAG_TIMEOUT:-60}"
 REPORT_TO="${REPORT_TO:-none}"
@@ -450,6 +455,7 @@ require_nonnegative_integer "MIN_GPU_FREE_MIB" "$MIN_GPU_FREE_MIB"
 require_positive_integer "HF_HUB_DOWNLOAD_TIMEOUT" "$HF_HUB_DOWNLOAD_TIMEOUT"
 require_positive_integer "HF_HUB_ETAG_TIMEOUT" "$HF_HUB_ETAG_TIMEOUT"
 [[ "$PRELOAD_MODELS" == "0" || "$PRELOAD_MODELS" == "1" ]] || fail "PRELOAD_MODELS must be 0 or 1."
+[[ "$HF_HUB_DISABLE_XET" == "0" || "$HF_HUB_DISABLE_XET" == "1" ]] || fail "HF_HUB_DISABLE_XET must be 0 or 1."
 [[ "$ATTACH" == "0" || "$ATTACH" == "1" ]] || fail "ATTACH must be 0 or 1."
 [[ "$DRY_RUN" == "0" || "$DRY_RUN" == "1" ]] || fail "DRY_RUN must be 0 or 1."
 [[ "$SUPERVISOR_MODE" == "0" || "$SUPERVISOR_MODE" == "1" ]] || fail "VA_GAZE_SUPERVISOR_MODE must be 0 or 1."
@@ -580,6 +586,8 @@ REQUIRED_KB="$((MIN_FREE_GB * 1024 * 1024))"
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path.cwd() / "src"))
+
 import accelerate
 import numpy as np
 import pandas as pd
@@ -588,6 +596,32 @@ import scipy
 import sklearn
 import torch
 import transformers
+
+from va_gaze.models.et2_wrapper import FixationsPredictor_2
+
+
+class BFloat16Et2Probe:
+    def __call__(self, input_ids, attention_mask, predict_mask):
+        batch_size, sequence_length = input_ids.shape
+        return torch.ones(
+            (batch_size, sequence_length, 5),
+            dtype=torch.bfloat16,
+            device=input_ids.device,
+        )
+
+
+et2_probe = object.__new__(FixationsPredictor_2)
+et2_probe.model = BFloat16Et2Probe()
+probe_input_ids = torch.ones((1, 8), dtype=torch.long)
+probe_predictions = et2_probe._sliding_window_predict(
+    probe_input_ids,
+    torch.ones_like(probe_input_ids),
+)
+if probe_predictions.dtype != np.float32:
+    raise SystemExit(
+        f"[error] ET2 BF16 NumPy boundary returned {probe_predictions.dtype}, expected float32."
+    )
+print("et2_bfloat16_numpy_preflight=ok")
 
 data_dir = Path(sys.argv[1])
 if not torch.cuda.is_available():
@@ -640,6 +674,7 @@ printf '%s\n' \
   "hetero_logvar_min=$HETERO_LOGVAR_MIN" \
   "hetero_logvar_max=$HETERO_LOGVAR_MAX" \
   "preload_models=$PRELOAD_MODELS" \
+  "hf_hub_disable_xet=$HF_HUB_DISABLE_XET" \
   "hf_hub_download_timeout=$HF_HUB_DOWNLOAD_TIMEOUT" \
   "hf_hub_etag_timeout=$HF_HUB_ETAG_TIMEOUT" \
   "command_gpu0=$COMMAND_0" \
