@@ -1,6 +1,8 @@
 import argparse
+import fcntl
 import json
 import os
+import re
 import socket
 from datetime import datetime
 from signal import signal
@@ -10,8 +12,6 @@ from va_gaze.eval.oof_reports import create_prediction_tables, handle_signal, se
 from va_gaze.train.fold1 import training_fold1
 from va_gaze.train.fold2 import training_fold2
 
-
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 MODEL_CHOICES = ["distilbert", "xlmroberta-base", "xlmroberta-large"]
 LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc", "hetero"]
@@ -201,6 +201,12 @@ def _build_parser():
     parser.add_argument("--optim", type=str, default="adamw_torch")
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fold", choices=["all", "1", "2"], default="all")
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Shared filesystem-safe run id for independently launched folds.",
+    )
     parser.add_argument("--maxlen", type=int, default=200)
     parser.add_argument("--data-dir", type=str, default="data")
     parser.add_argument(
@@ -254,6 +260,12 @@ def _validate_args(parser, args):
             _validate_positive_int("batch_size_xlmrB", args.batch_size_xlmrB)
         if args.batch_size_xlmrL is not None:
             _validate_positive_int("batch_size_xlmrL", args.batch_size_xlmrL)
+        if args.run_id is not None:
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.run_id) is None:
+                raise ValueError(
+                    "run_id must contain only letters, digits, dots, underscores, or hyphens "
+                    "and must start with a letter or digit."
+                )
         args.report_to = _parse_report_to(args.report_to)
     except ValueError as exc:
         parser.error(str(exc))
@@ -441,8 +453,8 @@ def _resolve_batch_sizes(args):
     return batch_size_distil, batch_size_xlmrB, batch_size_xlmrL
 
 
-def _create_run_dir(preds_dir_override=None):
-    timestamp = datetime.now().strftime("%b-%d_%H-%M-%S")
+def _create_run_dir(preds_dir_override=None, run_id=None):
+    timestamp = run_id or datetime.now().strftime("%b-%d_%H-%M-%S")
     host_name = os.environ.get("COMPUTERNAME") or os.environ.get("HOST") or socket.gethostname()
     preds_dir = preds_dir_override or f"Preds/{timestamp}_{host_name}"
     os.makedirs(preds_dir, exist_ok=bool(preds_dir_override))
@@ -450,9 +462,128 @@ def _create_run_dir(preds_dir_override=None):
     return timestamp, preds_dir
 
 
-def _save_training_parameters(preds_dir, run_parameters):
-    with open(f"{preds_dir}/training_parameters.json", "w") as output_file:
-        json.dump(run_parameters, output_file)
+def _atomic_write_json(path, payload):
+    """Write a JSON artifact atomically so parallel folds never expose a partial file."""
+    temporary_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(temporary_path, "w") as output_file:
+            json.dump(payload, output_file)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def _save_training_parameters(preds_dir, run_parameters, fold_selection):
+    """Persist either the combined-run manifest or one fold-specific manifest."""
+    filename = (
+        "training_parameters.json"
+        if fold_selection == "all"
+        else f"training_parameters_fold{fold_selection}.json"
+    )
+    payload = dict(run_parameters)
+    payload["fold"] = fold_selection
+    _atomic_write_json(os.path.join(preds_dir, filename), payload)
+
+
+def _merge_parallel_fold_parameters(preds_dir):
+    """Validate parallel-fold compatibility and create the combined run manifest."""
+    parameter_paths = [
+        os.path.join(preds_dir, "training_parameters_fold1.json"),
+        os.path.join(preds_dir, "training_parameters_fold2.json"),
+    ]
+    if not all(os.path.isfile(path) for path in parameter_paths):
+        return False
+    with open(parameter_paths[0]) as input_file:
+        fold1_parameters = json.load(input_file)
+    with open(parameter_paths[1]) as input_file:
+        fold2_parameters = json.load(input_file)
+    fold1_parameters.pop("fold", None)
+    fold2_parameters.pop("fold", None)
+    if fold1_parameters != fold2_parameters:
+        differing_keys = sorted(
+            key
+            for key in set(fold1_parameters) | set(fold2_parameters)
+            if fold1_parameters.get(key) != fold2_parameters.get(key)
+        )
+        raise ValueError(
+            "Parallel folds used incompatible experiment settings: "
+            + ", ".join(differing_keys)
+        )
+    combined_parameters = dict(fold1_parameters)
+    combined_parameters["fold"] = "all-parallel"
+    _atomic_write_json(
+        os.path.join(preds_dir, "training_parameters.json"),
+        combined_parameters,
+    )
+    return True
+
+
+def _prediction_files_ready(preds_dir):
+    """Return whether both held-out fold prediction files are complete and available."""
+    return all(
+        os.path.isfile(os.path.join(preds_dir, filename))
+        for filename in ("predictions_fold1.csv", "predictions_fold2.csv")
+    )
+
+
+def _create_prediction_tables_if_ready(preds_dir, data_dir, fold_selection):
+    """Create combined OOF reports once, after both independently run folds finish."""
+    if not _prediction_files_ready(preds_dir):
+        print(
+            f"[train_model] fold {fold_selection} finished; waiting for the other fold "
+            f"in {preds_dir}."
+        )
+        return False
+    lock_path = os.path.join(preds_dir, ".oof_report.lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if fold_selection != "all" and not _merge_parallel_fold_parameters(preds_dir):
+            print(
+                f"[train_model] predictions are ready but fold manifests are incomplete in "
+                f"{preds_dir}."
+            )
+            return False
+        create_prediction_tables(preds_dir, data_dir=data_dir)
+    return True
+
+
+def _run_selected_folds(
+    fold_selection,
+    model,
+    loss,
+    timestamp,
+    params,
+    dataset,
+    preds_dir,
+    checkpoint,
+    gaze_config,
+):
+    """Run all folds sequentially or exactly one fold for GPU-level parallelism."""
+    if fold_selection in ("all", "1"):
+        training_fold1(
+            model,
+            loss,
+            timestamp,
+            params,
+            dataset,
+            preds_dir,
+            checkpoint,
+            gaze_config=gaze_config,
+        )
+    if fold_selection in ("all", "2"):
+        if fold_selection == "all":
+            print("\n\n\n------------ NOW ON FOLD 2 -------------- \n\n\n")
+        training_fold2(
+            model,
+            loss,
+            timestamp,
+            params,
+            dataset,
+            preds_dir,
+            checkpoint,
+            gaze_config=gaze_config,
+        )
 
 
 def _load_dataset(checkpoint, maxlen, data_dir):
@@ -508,7 +639,7 @@ def main():
         "gaze_alignment_max_tokens": args.gaze_alignment_max_tokens,
     }
 
-    timestamp, preds_dir = _create_run_dir(args.preds_dir)
+    timestamp, preds_dir = _create_run_dir(args.preds_dir, run_id=args.run_id)
     params = {
         "batch_size_distil": batch_size_distil,
         "batch_size_xlmrB": batch_size_xlmrB,
@@ -573,15 +704,24 @@ def main():
         "gaze_alignment_temperature": gaze_config["gaze_alignment_temperature"],
         "gaze_alignment_max_tokens": gaze_config["gaze_alignment_max_tokens"],
         "path": preds_dir,
+        "run_id": args.run_id,
         **params,
     }
-    _save_training_parameters(preds_dir, run_parameters)
+    _save_training_parameters(preds_dir, run_parameters, args.fold)
 
     dataset = _load_dataset(checkpoint, args.maxlen, args.data_dir)
-    training_fold1(args.model, args.loss, timestamp, params, dataset, preds_dir, checkpoint, gaze_config=gaze_config)
-    print("\n\n\n------------ NOW ON FOLD 2 -------------- \n\n\n")
-    training_fold2(args.model, args.loss, timestamp, params, dataset, preds_dir, checkpoint, gaze_config=gaze_config)
-    create_prediction_tables(preds_dir, data_dir=args.data_dir)
+    _run_selected_folds(
+        args.fold,
+        args.model,
+        args.loss,
+        timestamp,
+        params,
+        dataset,
+        preds_dir,
+        checkpoint,
+        gaze_config,
+    )
+    _create_prediction_tables_if_ready(preds_dir, args.data_dir, args.fold)
 
 
 if __name__ == "__main__":

@@ -421,6 +421,45 @@ Use the filtered folder during training/evaluation:
 python train_model.py xlmroberta-large mse --data-dir data_no_iemocap
 ```
 
+### Run the two folds on separate GPUs
+
+Use `--fold 1` and `--fold 2` to train the two independent models concurrently.
+Both commands must use the same `--run-id`, `--preds-dir`, and experiment
+hyperparameters. Each process uses only its assigned GPU and writes a distinct
+fold checkpoint, final model, prediction file, metric file, and parameter
+manifest. The process that finishes second validates that both fold manifests
+match and creates the combined out-of-fold reports.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train_model.py xlmroberta-large mse \
+  --fold 1 \
+  --run-id xlmr_large_parallel_s42 \
+  --preds-dir ./Preds/xlmr_large_parallel_s42 \
+  --data-dir ./data_no_iemocap \
+  --batch-size 16 \
+  --seed 42 &
+
+CUDA_VISIBLE_DEVICES=1 python train_model.py xlmroberta-large mse \
+  --fold 2 \
+  --run-id xlmr_large_parallel_s42 \
+  --preds-dir ./Preds/xlmr_large_parallel_s42 \
+  --data-dir ./data_no_iemocap \
+  --batch-size 16 \
+  --seed 42 &
+
+wait
+```
+
+The final artifacts are grouped under:
+
+```text
+Output Directory/xlmr_large_parallel_s42/fold1/
+Output Directory/xlmr_large_parallel_s42/fold2/
+model/xlmr_large_parallel_s42/fold1/
+model/xlmr_large_parallel_s42/fold2/
+Preds/xlmr_large_parallel_s42/
+```
+
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**

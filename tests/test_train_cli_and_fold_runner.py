@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,15 @@ from unittest.mock import patch
 
 import numpy as np
 
-from va_gaze.cli.train_model import _build_parser, _validate_args
+from va_gaze.cli.train_model import (
+    _build_parser,
+    _create_prediction_tables_if_ready,
+    _create_run_dir,
+    _merge_parallel_fold_parameters,
+    _run_selected_folds,
+    _save_training_parameters,
+    _validate_args,
+)
 from va_gaze.train.fold_runner import (
     _build_model,
     _validate_prediction_array,
@@ -187,6 +196,22 @@ class TrainCliValidationTest(unittest.TestCase):
         )
         self.assertEqual(args.report_to, [])
 
+    def test_fold_selection_defaults_to_all_and_accepts_individual_folds(self):
+        self.assertEqual(parse_and_validate(["xlmroberta-base", "mse"]).fold, "all")
+        for fold in ("1", "2"):
+            with self.subTest(fold=fold):
+                args = parse_and_validate(
+                    ["xlmroberta-base", "mse", "--fold", fold, "--run-id", "shared-run"]
+                )
+                self.assertEqual(args.fold, fold)
+                self.assertEqual(args.run_id, "shared-run")
+
+    def test_run_id_rejects_path_components(self):
+        self.assert_cli_error(
+            ["--run-id", "nested/run"],
+            "run_id must contain only letters, digits, dots, underscores, or hyphens",
+        )
+
     def test_emotion_trt_alias_requires_trt_only_when_gaze_is_enabled(self):
         args = parse_and_validate(
             [
@@ -297,6 +322,62 @@ class TrainCliValidationTest(unittest.TestCase):
             transplant.call_args.kwargs["fusion_strategy"],
             "conditioned-pooling",
         )
+
+
+class ParallelFoldExecutionTest(unittest.TestCase):
+    def test_shared_run_id_groups_independent_fold_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timestamp, preds_dir = _create_run_dir(temp_dir, run_id="parallel-s42")
+        self.assertEqual(timestamp, "parallel-s42")
+        self.assertEqual(preds_dir, temp_dir)
+
+    def test_selected_fold_dispatches_exactly_one_training_function(self):
+        positional = ("model", "mse", "run", {}, [], "preds", "checkpoint", {})
+        with patch("va_gaze.cli.train_model.training_fold1") as fold1, patch(
+            "va_gaze.cli.train_model.training_fold2"
+        ) as fold2:
+            _run_selected_folds("1", *positional)
+            fold1.assert_called_once()
+            fold2.assert_not_called()
+
+        with patch("va_gaze.cli.train_model.training_fold1") as fold1, patch(
+            "va_gaze.cli.train_model.training_fold2"
+        ) as fold2:
+            _run_selected_folds("2", *positional)
+            fold1.assert_not_called()
+            fold2.assert_called_once()
+
+    def test_parallel_manifests_merge_only_when_settings_match(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parameters = {"model": "xlmroberta-large", "seed": 42, "batch_size": 16}
+            _save_training_parameters(temp_dir, parameters, "1")
+            _save_training_parameters(temp_dir, parameters, "2")
+            self.assertTrue(_merge_parallel_fold_parameters(temp_dir))
+            with open(Path(temp_dir) / "training_parameters.json") as input_file:
+                combined = json.load(input_file)
+            self.assertEqual(combined["fold"], "all-parallel")
+            self.assertEqual(combined["batch_size"], 16)
+
+            _save_training_parameters(temp_dir, {**parameters, "seed": 43}, "2")
+            with self.assertRaisesRegex(ValueError, "incompatible experiment settings: seed"):
+                _merge_parallel_fold_parameters(temp_dir)
+
+    def test_reports_wait_for_both_folds_and_finalize_under_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parameters = {"model": "xlmroberta-large", "seed": 42}
+            _save_training_parameters(temp_dir, parameters, "1")
+            self.assertFalse(
+                _create_prediction_tables_if_ready(temp_dir, "data", "1")
+            )
+
+            _save_training_parameters(temp_dir, parameters, "2")
+            (Path(temp_dir) / "predictions_fold1.csv").touch()
+            (Path(temp_dir) / "predictions_fold2.csv").touch()
+            with patch("va_gaze.cli.train_model.create_prediction_tables") as create_tables:
+                self.assertTrue(
+                    _create_prediction_tables_if_ready(temp_dir, "data_no_iemocap", "2")
+                )
+            create_tables.assert_called_once_with(temp_dir, data_dir="data_no_iemocap")
 
 
 class FoldRunnerContractTest(unittest.TestCase):
