@@ -473,8 +473,8 @@ Blackwell GPUs, the ET2 checkpoint, and both no-IEMOCAP fold files. Full
 XLM-R-large postfix runs at batch 16 should use both `--bf16` and
 `--gradient-checkpointing`.
 
-Launch two seeds (`42`, `43`) and their two folds across GPUs `0-3` in one
-four-pane tmux session with:
+Launch two seeds (`42`, `43`) and their two folds across GPUs `0-3` under one
+single-pane tmux supervisor with:
 
 ```bash
 conda activate va_gaze
@@ -486,8 +486,12 @@ The runner uses XLM-R-large, ET2 TRT-only postfix concat, no-IEMOCAP data,
 maximum full-held-out-fold `ccc_mean`, keeps one checkpoint per fold, reloads
 that checkpoint, writes the held-out predictions, saves the final fold model,
 and creates the combined OOF and uncertainty reports when both folds of a seed
-are complete. Terminal output remains visible in tmux and is also copied to
-`logs/<session>/gpu*.log`. Use `Ctrl-b d` to detach and run
+are complete. Before starting the four workers, it downloads and validates
+XLM-R-large and RoBERTa-base once; the workers then use the completed cache in
+offline mode so concurrent first-run downloads cannot corrupt a snapshot.
+All four streams remain visible in the same pane with GPU, seed, train-fold,
+and test-fold prefixes. Output is copied to `logs/<session>/combined.log` and
+four separate `gpu*.log` files. Use `Ctrl-b d` to detach and run
 `tmux attach -t <session>` to return. Inspect the exact four commands without
 starting training with:
 
