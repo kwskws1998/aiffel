@@ -22,7 +22,11 @@ usage() {
     "  cross_attention auxiliary_only alignment_only prefix_legacy" \
     "" \
     "Main variables:" \
-    "  LOSS=mse BATCH_SIZE=8 MAXLEN=200 TRAIN_EPOCHS=10 SEED=42" \
+    "  LOSS=mse|ccc|robust|mse+ccc|robust+ccc|hetero|hetero+ccc" \
+    "  HETERO_MSE_WEIGHT=0.1 HETERO_CCC_WEIGHT=0.1" \
+    "  HETERO_LOGVAR_MIN=-5.0 HETERO_LOGVAR_MAX=3.0" \
+    "  METRIC_FOR_BEST_MODEL=ccc_mean" \
+    "  BATCH_SIZE=8 MAXLEN=200 TRAIN_EPOCHS=10 SEED=42" \
     "  DATA_DIR=data ET_MODEL_TYPE=et2 ET2_CHECKPOINT=./checkpoints/et_predictor2_seed123" \
     "  ET_MODEL_TYPE=emotion-trt ET_MODEL_ID=skboy/emotion_trt_roberta_lr2e5_preval10" \
     "  OUTPUT_ROOT=Preds/distilbert_matrix_<timestamp>" \
@@ -49,6 +53,10 @@ fi
 
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 LOSS="${LOSS:-mse}"
+HETERO_MSE_WEIGHT="${HETERO_MSE_WEIGHT:-0.1}"
+HETERO_CCC_WEIGHT="${HETERO_CCC_WEIGHT:-0.1}"
+HETERO_LOGVAR_MIN="${HETERO_LOGVAR_MIN:--5.0}"
+HETERO_LOGVAR_MAX="${HETERO_LOGVAR_MAX:-3.0}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 MAXLEN="${MAXLEN:-200}"
 TRAIN_EPOCHS="${TRAIN_EPOCHS:-10}"
@@ -66,6 +74,7 @@ FP_DROPOUT="${FP_DROPOUT:-0.1,0.3}"
 SAVE_STRATEGY="${SAVE_STRATEGY:-epoch}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-1}"
 SAVE_FINAL_MODEL="${SAVE_FINAL_MODEL:-1}"
+METRIC_FOR_BEST_MODEL="${METRIC_FOR_BEST_MODEL:-ccc_mean}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-0}"
 CONDITIONS="${CONDITIONS:-core}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
@@ -74,8 +83,46 @@ DISTILBERT_CHECKPOINT="${DISTILBERT_CHECKPOINT:-}"
 DRY_RUN="${DRY_RUN:-0}"
 REQUIRE_CUDA="${REQUIRE_CUDA:-0}"
 
+case "$LOSS" in
+  mse|ccc|robust|mse+ccc|robust+ccc|hetero|hetero+ccc)
+    ;;
+  *)
+    echo "LOSS must be mse, ccc, robust, mse+ccc, robust+ccc, hetero, or hetero+ccc." >&2
+    exit 2
+    ;;
+esac
+
+case "$METRIC_FOR_BEST_MODEL" in
+  loss|mse_mean|ccc_mean|pearson_corr_mean|gaussian_nll_mean)
+    ;;
+  *)
+    echo "METRIC_FOR_BEST_MODEL must be loss, mse_mean, ccc_mean, pearson_corr_mean, or gaussian_nll_mean." >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$METRIC_FOR_BEST_MODEL" == "gaussian_nll_mean" && "$LOSS" != "hetero" && "$LOSS" != "hetero+ccc" ]]; then
+  echo "METRIC_FOR_BEST_MODEL=gaussian_nll_mean requires LOSS=hetero or LOSS=hetero+ccc." >&2
+  exit 2
+fi
+
 if [[ "$SKIP_COMPLETED" != "0" && "$SKIP_COMPLETED" != "1" ]]; then
   echo "SKIP_COMPLETED must be 0 or 1." >&2
+  exit 2
+fi
+
+if [[ "$SAVE_STRATEGY" != "epoch" && "$SAVE_STRATEGY" != "no" ]]; then
+  echo "SAVE_STRATEGY must be epoch or no." >&2
+  exit 2
+fi
+
+if [[ "$SAVE_FINAL_MODEL" != "0" && "$SAVE_FINAL_MODEL" != "1" ]]; then
+  echo "SAVE_FINAL_MODEL must be 0 or 1." >&2
+  exit 2
+fi
+
+if [[ ! "$SAVE_TOTAL_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "SAVE_TOTAL_LIMIT must be a positive integer." >&2
   exit 2
 fi
 
@@ -154,6 +201,15 @@ if [[ "$DRY_RUN" != "1" ]]; then
   fi
 fi
 
+training_parameters_match_selection() {
+  local parameters_path="$1"
+  local expected_enabled=1
+  if [[ "$SAVE_STRATEGY" == "no" ]]; then
+    expected_enabled=0
+  fi
+  "$PYTHON_BIN" -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); actual_metric = data.get("metric_for_best_model", "loss"); actual_enabled = data.get("best_model_selection_enabled"); actual_enabled = bool(data.get("load_best_model_at_end", True) and data.get("save_strategy", "epoch") != "no") if actual_enabled is None else bool(actual_enabled); actual_final = bool(data.get("save_final_model", True)); expected_enabled = sys.argv[3] == "1"; expected_final = sys.argv[4] == "1"; compatible = actual_metric == sys.argv[2] and actual_enabled == expected_enabled and actual_final == expected_final; raise SystemExit(0 if compatible else 1)' "$parameters_path" "$METRIC_FOR_BEST_MODEL" "$expected_enabled" "$SAVE_FINAL_MODEL"
+}
+
 export WANDB_DISABLED=true
 export WANDB_MODE=disabled
 export TOKENIZERS_PARALLELISM=false
@@ -174,6 +230,11 @@ COMMON_ARGS=(
   --warmup-ratio "$WARMUP_RATIO"
   --gradient-accumulation-steps "$GRADIENT_ACCUMULATION_STEPS"
   --seed "$SEED"
+  --hetero-mse-weight "$HETERO_MSE_WEIGHT"
+  --hetero-ccc-weight "$HETERO_CCC_WEIGHT"
+  --hetero-logvar-min "$HETERO_LOGVAR_MIN"
+  --hetero-logvar-max "$HETERO_LOGVAR_MAX"
+  --metric-for-best-model "$METRIC_FOR_BEST_MODEL"
   --optim adamw_torch
   --report-to none
   "${SAVE_ARGS[@]}"
@@ -211,6 +272,7 @@ run_condition() {
   shift
   local result_dir="$OUTPUT_ROOT/${condition}_seed${SEED}"
   local log_path="$OUTPUT_ROOT/logs/${condition}_seed${SEED}.log"
+  local uncertainty_reports_complete=1
   local command=(
     "$PYTHON_BIN" train_model.py distilbert "$LOSS"
     --preds-dir "$result_dir"
@@ -225,10 +287,24 @@ run_condition() {
     return
   fi
 
+  if [[ "$LOSS" == "hetero" || "$LOSS" == "hetero+ccc" ]]; then
+    if [[ ! -s "$result_dir/uncertainty_calibration.csv" || ! -s "$result_dir/uncertainty_risk_coverage.csv" ]]; then
+      uncertainty_reports_complete=0
+    fi
+  fi
+
   if [[ -e "$result_dir" ]]; then
-    if [[ "$SKIP_COMPLETED" == "1" && -s "$result_dir/training_parameters.json" && -s "$result_dir/predictions_fold1.csv" && -s "$result_dir/predictions_fold2.csv" && -s "$result_dir/overall_metrics.json" ]]; then
+    selection_compatible=0
+    if [[ -s "$result_dir/training_parameters.json" ]] && training_parameters_match_selection "$result_dir/training_parameters.json"; then
+      selection_compatible=1
+    fi
+    if [[ "$SKIP_COMPLETED" == "1" && "$selection_compatible" == "1" && "$uncertainty_reports_complete" == "1" && -s "$result_dir/predictions_fold1.csv" && -s "$result_dir/predictions_fold2.csv" && -s "$result_dir/overall_metrics.json" ]]; then
       echo "Skipping completed result: $result_dir"
       return
+    fi
+    if [[ "$SKIP_COMPLETED" == "1" && "$selection_compatible" == "0" && -s "$result_dir/training_parameters.json" ]]; then
+      echo "Refusing to reuse result with incompatible checkpoint selection: $result_dir" >&2
+      exit 2
     fi
     echo "Refusing to overwrite existing result directory: $result_dir" >&2
     exit 2
@@ -239,6 +315,10 @@ run_condition() {
   test -s "$result_dir/predictions_fold1.csv"
   test -s "$result_dir/predictions_fold2.csv"
   test -s "$result_dir/overall_metrics.json"
+  if [[ "$LOSS" == "hetero" || "$LOSS" == "hetero+ccc" ]]; then
+    test -s "$result_dir/uncertainty_calibration.csv"
+    test -s "$result_dir/uncertainty_risk_coverage.csv"
+  fi
 }
 
 for condition in "${SELECTED_CONDITIONS[@]}"; do

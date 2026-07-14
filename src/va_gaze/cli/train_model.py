@@ -1,6 +1,7 @@
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import socket
@@ -11,10 +12,16 @@ from va_gaze.data.dataset import MyDataset
 from va_gaze.eval.oof_reports import create_prediction_tables, handle_signal, set_preds_dir
 from va_gaze.train.fold1 import training_fold1
 from va_gaze.train.fold2 import training_fold2
+from va_gaze.train.loss_names import HETEROSCEDASTIC_LOSSES, LOSS_CHOICES
+from va_gaze.train.model_selection import (
+    BEST_MODEL_METRIC_CHOICES,
+    DEFAULT_BEST_MODEL_METRIC,
+    best_model_greater_is_better,
+    validate_best_model_metric,
+)
 
 
 MODEL_CHOICES = ["distilbert", "xlmroberta-base", "xlmroberta-large"]
-LOSS_CHOICES = ["mse", "ccc", "robust", "mse+ccc", "robust+ccc", "hetero"]
 ET_MODEL_CHOICES = [
     "et2",
     "emotion-et",
@@ -196,6 +203,7 @@ def _build_parser():
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.1)
     parser.add_argument("--hetero-mse-weight", type=float, default=0.1)
+    parser.add_argument("--hetero-ccc-weight", type=float, default=0.1)
     parser.add_argument("--hetero-logvar-min", type=float, default=-5.0)
     parser.add_argument("--hetero-logvar-max", type=float, default=3.0)
     parser.add_argument("--optim", type=str, default="adamw_torch")
@@ -225,6 +233,15 @@ def _build_parser():
     )
     parser.add_argument("--save-strategy", choices=["epoch", "no"], default="epoch")
     parser.add_argument("--save-total-limit", type=int, default=1)
+    parser.add_argument(
+        "--metric-for-best-model",
+        choices=BEST_MODEL_METRIC_CHOICES,
+        default=DEFAULT_BEST_MODEL_METRIC,
+        help=(
+            "Validation metric used to retain the best checkpoint. The default "
+            "maximizes full-validation-set mean CCC for VA performance."
+        ),
+    )
     parser.add_argument("--save-final-model", dest="save_final_model", action="store_true")
     parser.add_argument("--no-save-final-model", dest="save_final_model", action="store_false")
     parser.add_argument(
@@ -312,11 +329,28 @@ def _validate_args(parser, args):
         except ValueError as exc:
             parser.error(str(exc))
 
-    if args.hetero_mse_weight < 0:
-        parser.error("hetero_mse_weight must be >= 0.")
+    for name, value in (
+        ("hetero_mse_weight", args.hetero_mse_weight),
+        ("hetero_ccc_weight", args.hetero_ccc_weight),
+        ("hetero_logvar_min", args.hetero_logvar_min),
+        ("hetero_logvar_max", args.hetero_logvar_max),
+    ):
+        if not math.isfinite(value):
+            parser.error(f"{name} must be finite.")
+
+    if args.hetero_mse_weight < 0 or args.hetero_ccc_weight < 0:
+        parser.error("hetero_mse_weight and hetero_ccc_weight must be >= 0.")
 
     if args.hetero_logvar_min >= args.hetero_logvar_max:
         parser.error("hetero_logvar_min must be smaller than hetero_logvar_max.")
+
+    try:
+        validate_best_model_metric(
+            args.metric_for_best_model,
+            heteroscedastic=args.loss in HETEROSCEDASTIC_LOSSES,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.use_gaze_concat and args.use_gaze_add:
         parser.error("--use-gaze-concat and --use-gaze-add are mutually exclusive.")
@@ -403,9 +437,10 @@ def _validate_args(parser, args):
                 "--gaze-fusion gmm-dual-gate-pooling learns its GMM internally; "
                 "use --gaze-transform raw."
             )
-        if args.loss == "hetero":
+        if args.loss in HETEROSCEDASTIC_LOSSES:
             parser.error(
-                "--gaze-fusion gmm-dual-gate-pooling does not currently support hetero loss."
+                "--gaze-fusion gmm-dual-gate-pooling does not currently support "
+                "heteroscedastic losses."
             )
         if args.gmm_components < 2:
             parser.error(
@@ -427,9 +462,9 @@ def _validate_args(parser, args):
                 "--gaze-fusion gmm-arousal-residual fits a fold-local GMM; "
                 "use --gaze-transform raw."
             )
-        if args.loss == "hetero":
+        if args.loss in HETEROSCEDASTIC_LOSSES:
             parser.error(
-                "--gaze-fusion gmm-arousal-residual does not support hetero loss."
+                "--gaze-fusion gmm-arousal-residual does not support heteroscedastic losses."
             )
         if args.gmm_residual_mode == "posterior" and args.gmm_components < 2:
             parser.error(
@@ -645,6 +680,10 @@ def main():
     }
 
     timestamp, preds_dir = _create_run_dir(args.preds_dir, run_id=args.run_id)
+    effective_hetero_ccc_weight = (
+        args.hetero_ccc_weight if args.loss == "hetero+ccc" else 0.0
+    )
+    best_model_greater = best_model_greater_is_better(args.metric_for_best_model)
     params = {
         "batch_size_distil": batch_size_distil,
         "batch_size_xlmrB": batch_size_xlmrB,
@@ -655,6 +694,7 @@ def main():
         "weight_decay": args.weight_decay,
         "warmup_ratio": args.warmup_ratio,
         "hetero_mse_weight": args.hetero_mse_weight,
+        "hetero_ccc_weight": effective_hetero_ccc_weight,
         "hetero_logvar_min": args.hetero_logvar_min,
         "hetero_logvar_max": args.hetero_logvar_max,
         "optim": args.optim,
@@ -666,6 +706,9 @@ def main():
         "maxlen": args.maxlen,
         "save_strategy": args.save_strategy,
         "save_total_limit": args.save_total_limit,
+        "metric_for_best_model": args.metric_for_best_model,
+        "greater_is_better": best_model_greater,
+        "best_model_selection_enabled": args.load_best_model_at_end,
         "save_final_model": args.save_final_model,
         "load_best_model_at_end": args.load_best_model_at_end,
         "data_dir": args.data_dir,

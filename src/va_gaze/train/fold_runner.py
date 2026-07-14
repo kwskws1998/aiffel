@@ -1,10 +1,27 @@
 import inspect
+from functools import partial
 
 import numpy as np
 import pandas as pd
 import torch
 from transformers import DataCollatorWithPadding, Trainer, TrainingArguments, set_seed
 
+from va_gaze.eval.metrics import compute_metrics
+from va_gaze.models.advanced_regression import (
+    CANONICAL_ADVANCED_GAZE_FUSIONS,
+    GazeFusionForSequenceRegression,
+    normalize_advanced_fusion,
+)
+from va_gaze.models.regression import (
+    DistilBertForSequenceClassificationHeteroscedastic,
+    DistilBertForSequenceClassificationSig,
+    GazeAddForSequenceRegression,
+    GazeConcatForSequenceRegression,
+    GazeGmmAdapterForSequenceRegression,
+    GazeSummaryForSequenceRegression,
+    XLMRobertaForSequenceClassificationHeteroscedastic,
+    XLMRobertaForSequenceClassificationSig,
+)
 from va_gaze.train.custom_trainer import (
     CustomTrainerCCC,
     CustomTrainerHeteroscedastic,
@@ -14,21 +31,10 @@ from va_gaze.train.custom_trainer import (
     CustomTrainerRobustCCC,
 )
 from va_gaze.train.gmm_fit import fit_train_fold_gmm_residual
-from va_gaze.eval.metrics import compute_metrics
-from va_gaze.models.advanced_regression import (
-    CANONICAL_ADVANCED_GAZE_FUSIONS,
-    GazeFusionForSequenceRegression,
-    normalize_advanced_fusion,
-)
-from va_gaze.models.regression import (
-    DistilBertForSequenceClassificationSig,
-    DistilBertForSequenceClassificationHeteroscedastic,
-    GazeAddForSequenceRegression,
-    GazeConcatForSequenceRegression,
-    GazeGmmAdapterForSequenceRegression,
-    GazeSummaryForSequenceRegression,
-    XLMRobertaForSequenceClassificationHeteroscedastic,
-    XLMRobertaForSequenceClassificationSig,
+from va_gaze.train.loss_names import HETEROSCEDASTIC_LOSSES
+from va_gaze.train.model_selection import (
+    DEFAULT_BEST_MODEL_METRIC,
+    best_model_greater_is_better,
 )
 
 
@@ -39,7 +45,15 @@ LOSS_TO_TRAINER = {
     "mse+ccc": CustomTrainerMSE_CCC,
     "robust+ccc": CustomTrainerRobustCCC,
     "hetero": CustomTrainerHeteroscedastic,
+    "hetero+ccc": CustomTrainerHeteroscedastic,
 }
+
+HETEROSCEDASTIC_OUTPUTS = (
+    "valence_mu",
+    "arousal_mu",
+    "valence_logvar_raw",
+    "arousal_logvar_raw",
+)
 
 CONCAT_FUSION_ALIASES = {
     "concat": "postfix-concat",
@@ -217,6 +231,19 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
     load_best_model_at_end = params.get("load_best_model_at_end", True)
     if save_strategy == "no":
         load_best_model_at_end = False
+    metric_for_best_model = params.get(
+        "metric_for_best_model",
+        DEFAULT_BEST_MODEL_METRIC,
+    )
+    expected_greater_is_better = best_model_greater_is_better(metric_for_best_model)
+    configured_greater_is_better = bool(
+        params.get("greater_is_better", expected_greater_is_better)
+    )
+    if configured_greater_is_better != expected_greater_is_better:
+        raise ValueError(
+            "greater_is_better does not match metric_for_best_model="
+            f"{metric_for_best_model}."
+        )
 
     training_kwargs = {
         "output_dir": output_dir,
@@ -241,6 +268,9 @@ def _build_training_args(output_dir, logging_dir, batch_size, params):
         "warmup_ratio": params["warmup_ratio"],
         "dataloader_pin_memory": torch.cuda.is_available(),
     }
+    if load_best_model_at_end:
+        training_kwargs["metric_for_best_model"] = metric_for_best_model
+        training_kwargs["greater_is_better"] = expected_greater_is_better
     if params.get("gradient_checkpointing", False):
         training_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
     if params.get("report_to") is not None:
@@ -258,12 +288,22 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data, params
     trainer_kwargs = {}
     if params.get("gaze_learning_rate") is not None:
         trainer_kwargs["gaze_learning_rate"] = params["gaze_learning_rate"]
-    if loss_name == "hetero":
+    checkpoint_metric = None
+    if getattr(training_args, "load_best_model_at_end", False):
+        checkpoint_metric = getattr(training_args, "metric_for_best_model", None)
+    logvar_min = params.get("hetero_logvar_min", -5.0)
+    logvar_max = params.get("hetero_logvar_max", 3.0)
+    if loss_name in HETEROSCEDASTIC_LOSSES:
         trainer_kwargs.update(
             {
                 "hetero_mse_weight": params.get("hetero_mse_weight", 0.1),
-                "hetero_logvar_min": params.get("hetero_logvar_min", -5.0),
-                "hetero_logvar_max": params.get("hetero_logvar_max", 3.0),
+                "hetero_ccc_weight": (
+                    params.get("hetero_ccc_weight", 0.1)
+                    if loss_name == "hetero+ccc"
+                    else 0.0
+                ),
+                "hetero_logvar_min": logvar_min,
+                "hetero_logvar_max": logvar_max,
             }
         )
     trainer_kwargs.update(
@@ -271,7 +311,12 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data, params
             "data_collator": DataCollatorWithPadding(train_data.tokenizer),
             "train_dataset": train_data,
             "eval_dataset": val_data,
-            "compute_metrics": compute_metrics,
+            "compute_metrics": partial(
+                compute_metrics,
+                logvar_min=logvar_min,
+                logvar_max=logvar_max,
+                metric_for_best_model=checkpoint_metric,
+            ),
         }
     )
     trainer_argument_names = inspect.signature(Trainer.__init__).parameters
@@ -284,6 +329,39 @@ def _build_trainer(loss_name, model, training_args, train_data, val_data, params
         args=training_args,
         **trainer_kwargs,
     )
+
+
+def _attach_heteroscedastic_config(model, loss_name, params):
+    """Persist the trained uncertainty objective and four-column output contract."""
+
+    if loss_name not in HETEROSCEDASTIC_LOSSES:
+        return model
+    config = getattr(model, "config", None)
+    if config is None:
+        raise ValueError("Heteroscedastic models must expose a serializable config.")
+    config.loss_function = loss_name
+    config.num_labels = len(HETEROSCEDASTIC_OUTPUTS)
+    config.hetero_mse_weight = float(params.get("hetero_mse_weight", 0.1))
+    config.hetero_ccc_weight = float(
+        params.get("hetero_ccc_weight", 0.1) if loss_name == "hetero+ccc" else 0.0
+    )
+    config.hetero_logvar_min = float(params.get("hetero_logvar_min", -5.0))
+    config.hetero_logvar_max = float(params.get("hetero_logvar_max", 3.0))
+    config.heteroscedastic_outputs = list(HETEROSCEDASTIC_OUTPUTS)
+    config.checkpoint_selection_metric = str(
+        params.get("metric_for_best_model", DEFAULT_BEST_MODEL_METRIC)
+    )
+    config.checkpoint_greater_is_better = bool(
+        params.get(
+            "greater_is_better",
+            best_model_greater_is_better(config.checkpoint_selection_metric),
+        )
+    )
+    config.checkpoint_selection_enabled = bool(
+        params.get("load_best_model_at_end", True)
+        and params.get("save_strategy", "epoch") != "no"
+    )
+    return model
 
 
 def _validate_prediction_array(predictions, output_dim):
@@ -327,7 +405,7 @@ def run_fold(
     logging_dir = f"logs/logs{fold_id}"
     batch_size = _select_batch_size(model_name, params)
 
-    output_dim = 4 if loss_name == "hetero" else 2
+    output_dim = 4 if loss_name in HETEROSCEDASTIC_LOSSES else 2
     set_seed(params.get("seed", 42))
     model = _build_model(
         model_name,
@@ -336,6 +414,7 @@ def run_fold(
         gaze_config,
         output_dim=output_dim,
     )
+    _attach_heteroscedastic_config(model, loss_name, params)
     if getattr(model, "fusion_strategy", None) == "gmm-arousal-residual":
         fit_train_fold_gmm_residual(
             model=model,

@@ -1,9 +1,16 @@
+import json
+import math
+from pathlib import Path
+
 import numpy as np
 import robust_loss_pytorch
 import torch
 from transformers import Trainer
 
-from va_gaze.eval.oof_reports import pearsonr
+from va_gaze.train.model_selection import best_model_greater_is_better
+
+
+HETEROSCEDASTIC_CONFIG_FILENAME = "heteroscedastic_config.json"
 
 
 def _pop_labels(inputs):
@@ -22,23 +29,96 @@ def _add_model_auxiliary_loss(task_loss, outputs):
     return task_loss + auxiliary_loss
 
 
-def _ccc_loss(logits, labels):
-    logits_v = logits[:, 0]
-    logits_a = logits[:, 1]
-    labels_v = labels[:, 0]
-    labels_a = labels[:, 1]
+def _save_heteroscedastic_config(model, output_dir, training_args=None):
+    """Persist the effective uncertainty objective for every model class."""
 
-    num_v = 2 * pearsonr(logits_v, labels_v) * torch.std(logits_v) * torch.std(labels_v)
-    den_v = torch.var(logits_v) + torch.var(labels_v) + torch.square(torch.mean(logits_v) - torch.mean(labels_v))
-    ccc_v = num_v / den_v
-    loss_v = 1 - ccc_v
+    config = getattr(model, "config", None)
+    output_names = getattr(config, "heteroscedastic_outputs", None)
+    target_path = Path(output_dir) / HETEROSCEDASTIC_CONFIG_FILENAME
+    if not output_names:
+        if target_path.is_file():
+            target_path.unlink()
+        return
+    if training_args is None:
+        selection_metric = getattr(config, "checkpoint_selection_metric", None)
+        selection_enabled = bool(
+            getattr(config, "checkpoint_selection_enabled", False)
+        )
+        selection_greater = getattr(
+            config,
+            "checkpoint_greater_is_better",
+            None,
+        )
+    else:
+        selection_metric = getattr(training_args, "metric_for_best_model", None)
+        save_strategy = getattr(training_args, "save_strategy", None)
+        save_strategy = getattr(save_strategy, "value", save_strategy)
+        selection_enabled = bool(
+            getattr(training_args, "load_best_model_at_end", False)
+            and selection_metric is not None
+            and save_strategy != "no"
+        )
+        selection_greater = getattr(training_args, "greater_is_better", None)
+    if selection_metric is not None:
+        selection_metric = str(selection_metric)
+        if selection_greater is None:
+            selection_greater = best_model_greater_is_better(selection_metric)
+    payload = {
+        "schema_version": 2,
+        "loss_function": str(config.loss_function),
+        "num_labels": int(config.num_labels),
+        "hetero_mse_weight": float(config.hetero_mse_weight),
+        "hetero_ccc_weight": float(config.hetero_ccc_weight),
+        "hetero_logvar_min": float(config.hetero_logvar_min),
+        "hetero_logvar_max": float(config.hetero_logvar_max),
+        "heteroscedastic_outputs": list(output_names),
+        "checkpoint_selection_metric": selection_metric,
+        "checkpoint_greater_is_better": (
+            None if selection_greater is None else bool(selection_greater)
+        ),
+        "checkpoint_selection_enabled": selection_enabled,
+    }
+    with open(target_path, "w", encoding="utf-8") as output_file:
+        json.dump(payload, output_file, indent=2, sort_keys=True, allow_nan=False)
+        output_file.write("\n")
 
-    num_a = 2 * pearsonr(logits_a, labels_a) * torch.std(logits_a) * torch.std(labels_a)
-    den_a = torch.var(logits_a) + torch.var(labels_a) + torch.square(torch.mean(logits_a) - torch.mean(labels_a))
-    ccc_a = num_a / den_a
-    loss_a = 1 - ccc_a
 
-    return 0.5 * loss_v + 0.5 * loss_a
+def _ccc_loss(logits, labels, eps=1e-8):
+    """Return a finite mean CCC loss over valid VA target dimensions."""
+
+    if logits.ndim != 2 or labels.ndim != 2:
+        raise ValueError("CCC loss requires 2D prediction and label tensors.")
+    if logits.shape != labels.shape:
+        raise ValueError(
+            f"CCC prediction and label shapes must match, got {logits.shape} and {labels.shape}."
+        )
+    if logits.shape[1] != 2:
+        raise ValueError(f"CCC loss requires exactly two VA columns, got {logits.shape[1]}.")
+
+    working_dtype = (
+        torch.float32 if logits.dtype in (torch.float16, torch.bfloat16) else logits.dtype
+    )
+    predictions = logits.to(dtype=working_dtype)
+    targets = labels.to(dtype=working_dtype)
+    prediction_mean = predictions.mean(dim=0)
+    target_mean = targets.mean(dim=0)
+    prediction_centered = predictions - prediction_mean
+    target_centered = targets - target_mean
+    correction_denominator = max(int(predictions.shape[0]) - 1, 1)
+    prediction_variance = prediction_centered.square().sum(dim=0) / correction_denominator
+    target_variance = target_centered.square().sum(dim=0) / correction_denominator
+    covariance = (prediction_centered * target_centered).sum(dim=0) / correction_denominator
+    denominator = (
+        prediction_variance
+        + target_variance
+        + torch.square(prediction_mean - target_mean)
+    )
+    ccc = 2.0 * covariance / denominator.clamp_min(float(eps))
+    ccc = torch.clamp(ccc, min=-1.0, max=1.0)
+    valid_dimensions = target_variance > float(eps)
+    if not torch.any(valid_dimensions):
+        return predictions.sum() * 0.0
+    return (1.0 - ccc[valid_dimensions]).mean()
 
 
 def _build_adaptive_loss(num_dims=2):
@@ -74,12 +154,35 @@ def _robust_loss(adaptive, logits, labels):
 
 
 def _split_heteroscedastic_logits(logits):
-    if logits.shape[-1] < 4:
+    if logits.ndim != 2 or logits.shape[-1] != 4:
         raise ValueError(
-            "Heteroscedastic loss requires model logits with at least 4 columns: "
+            "Heteroscedastic loss requires 2D model logits with exactly 4 columns: "
             "valence_mu, arousal_mu, valence_logvar, arousal_logvar."
         )
     return logits[:, :2], logits[:, 2:4]
+
+
+def _validate_heteroscedastic_parameters(
+    mse_weight,
+    ccc_weight,
+    logvar_min,
+    logvar_max,
+):
+    """Validate direct API use of heteroscedastic loss hyperparameters."""
+
+    values = {
+        "mse_weight": mse_weight,
+        "ccc_weight": ccc_weight,
+        "logvar_min": logvar_min,
+        "logvar_max": logvar_max,
+    }
+    for name, value in values.items():
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite.")
+    if float(mse_weight) < 0 or float(ccc_weight) < 0:
+        raise ValueError("Heteroscedastic MSE and CCC weights must be non-negative.")
+    if float(logvar_min) >= float(logvar_max):
+        raise ValueError("logvar_min must be smaller than logvar_max.")
 
 
 class VARegressionTrainer(Trainer):
@@ -134,18 +237,41 @@ class VARegressionTrainer(Trainer):
         super()._save(output_dir=output_dir, state_dict=state_dict)
         target_dir = output_dir or self.args.output_dir
         model = self.accelerator.unwrap_model(self.model)
+        _save_heteroscedastic_config(model, target_dir, training_args=self.args)
         save_manifest = getattr(model, "save_architecture_manifest", None)
         if callable(save_manifest):
             save_manifest(target_dir)
 
 
-def _heteroscedastic_loss(logits, labels, mse_weight=0.1, logvar_min=-5.0, logvar_max=3.0):
+def _heteroscedastic_loss(
+    logits,
+    labels,
+    mse_weight=0.1,
+    ccc_weight=0.0,
+    logvar_min=-5.0,
+    logvar_max=3.0,
+):
+    """Combine Gaussian NLL with optional point and concordance anchors."""
+
+    _validate_heteroscedastic_parameters(
+        mse_weight=mse_weight,
+        ccc_weight=ccc_weight,
+        logvar_min=logvar_min,
+        logvar_max=logvar_max,
+    )
     mu, logvar = _split_heteroscedastic_logits(logits)
+    if labels.shape != mu.shape:
+        raise ValueError(
+            f"Heteroscedastic labels must have shape {mu.shape}, got {labels.shape}."
+        )
     logvar = torch.clamp(logvar, min=logvar_min, max=logvar_max)
     squared_error = torch.square(labels - mu)
     nll = 0.5 * torch.exp(-logvar) * squared_error + 0.5 * logvar
     mse_anchor = torch.nn.functional.mse_loss(mu, labels)
-    return nll.mean() + float(mse_weight) * mse_anchor
+    loss = nll.mean() + float(mse_weight) * mse_anchor
+    if float(ccc_weight) > 0:
+        loss = loss + float(ccc_weight) * _ccc_loss(mu, labels)
+    return loss
 
 
 class CustomTrainerMSE(VARegressionTrainer):
@@ -223,12 +349,14 @@ class CustomTrainerHeteroscedastic(VARegressionTrainer):
         self,
         *args,
         hetero_mse_weight=0.1,
+        hetero_ccc_weight=0.0,
         hetero_logvar_min=-5.0,
         hetero_logvar_max=3.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.hetero_mse_weight = hetero_mse_weight
+        self.hetero_ccc_weight = hetero_ccc_weight
         self.hetero_logvar_min = hetero_logvar_min
         self.hetero_logvar_max = hetero_logvar_max
 
@@ -240,6 +368,7 @@ class CustomTrainerHeteroscedastic(VARegressionTrainer):
             logits,
             labels,
             mse_weight=self.hetero_mse_weight,
+            ccc_weight=self.hetero_ccc_weight,
             logvar_min=self.hetero_logvar_min,
             logvar_max=self.hetero_logvar_max,
         )

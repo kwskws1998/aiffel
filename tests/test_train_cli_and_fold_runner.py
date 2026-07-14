@@ -24,6 +24,10 @@ from va_gaze.train.fold_runner import (
     _validate_prediction_array,
     run_fold,
 )
+from va_gaze.train.model_selection import (
+    BEST_MODEL_METRIC_DIRECTIONS,
+    best_model_greater_is_better,
+)
 
 
 def parse_and_validate(arguments):
@@ -206,6 +210,29 @@ class TrainCliValidationTest(unittest.TestCase):
                 )
                 self.assertEqual(args.fold, fold)
                 self.assertEqual(args.run_id, "shared-run")
+
+    def test_best_model_metric_defaults_to_full_fold_ccc_and_validates_nll(self):
+        default_args = parse_and_validate(["xlmroberta-base", "mse"])
+        self.assertEqual(default_args.metric_for_best_model, "ccc_mean")
+
+        loss_args = parse_and_validate(
+            ["xlmroberta-base", "mse", "--metric-for-best-model", "loss"]
+        )
+        self.assertEqual(loss_args.metric_for_best_model, "loss")
+
+        hetero_args = parse_and_validate(
+            [
+                "xlmroberta-base",
+                "hetero",
+                "--metric-for-best-model",
+                "gaussian_nll_mean",
+            ]
+        )
+        self.assertEqual(hetero_args.metric_for_best_model, "gaussian_nll_mean")
+        self.assert_cli_error(
+            ["--metric-for-best-model", "gaussian_nll_mean"],
+            "requires a heteroscedastic loss",
+        )
 
     def test_run_id_rejects_path_components(self):
         self.assert_cli_error(
@@ -428,6 +455,65 @@ class FoldRunnerContractTest(unittest.TestCase):
         )
         self.assertEqual(captured["per_device_train_batch_size"], 16)
         self.assertEqual(captured["evaluation_strategy"], "epoch")
+        self.assertEqual(captured["metric_for_best_model"], "ccc_mean")
+        self.assertTrue(captured["greater_is_better"])
+
+    def test_training_arguments_apply_metric_direction_only_when_best_loading_is_enabled(self):
+        captured = {}
+
+        class FakeTrainingArguments:
+            def __init__(self, evaluation_strategy=None, **kwargs):
+                captured.update(kwargs)
+                captured["evaluation_strategy"] = evaluation_strategy
+
+        base_params = {
+            "train_epochs": 2,
+            "lr": 6e-6,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.1,
+            "metric_for_best_model": "loss",
+            "greater_is_better": False,
+        }
+        with patch("va_gaze.train.fold_runner.TrainingArguments", FakeTrainingArguments):
+            _build_training_args("output", "logs", 4, base_params)
+        self.assertEqual(captured["metric_for_best_model"], "loss")
+        self.assertFalse(captured["greater_is_better"])
+
+        captured.clear()
+        disabled_params = {
+            **base_params,
+            "load_best_model_at_end": False,
+        }
+        with patch("va_gaze.train.fold_runner.TrainingArguments", FakeTrainingArguments):
+            _build_training_args("output", "logs", 4, disabled_params)
+        self.assertNotIn("metric_for_best_model", captured)
+        self.assertNotIn("greater_is_better", captured)
+
+        mismatched_params = {
+            **base_params,
+            "greater_is_better": True,
+        }
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            _build_training_args("output", "logs", 4, mismatched_params)
+
+        captured.clear()
+        no_save_params = {
+            **base_params,
+            "save_strategy": "no",
+        }
+        with patch("va_gaze.train.fold_runner.TrainingArguments", FakeTrainingArguments):
+            _build_training_args("output", "logs", 4, no_save_params)
+        self.assertFalse(captured["load_best_model_at_end"])
+        self.assertNotIn("metric_for_best_model", captured)
+        self.assertNotIn("greater_is_better", captured)
+
+    def test_every_supported_best_model_metric_has_an_explicit_direction(self):
+        for metric_name, expected_direction in BEST_MODEL_METRIC_DIRECTIONS.items():
+            with self.subTest(metric_name=metric_name):
+                self.assertEqual(
+                    best_model_greater_is_better(metric_name),
+                    expected_direction,
+                )
 
     def test_prediction_array_contract(self):
         expected = np.zeros((3, 2), dtype=np.float32)

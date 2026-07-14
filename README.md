@@ -476,7 +476,115 @@ XLM-R-large postfix runs at batch 16 should use both `--bf16` and
 To fine-tune the model please run the file `train_model.py`.
 It expects two arguments:
 - Model: **distilbert** or **xlmroberta-base** or **xlmroberta-large**
-- Loss function: **mse**, **ccc**, **robust**, **mse+ccc**, **robust+ccc**, or **hetero**
+- Loss function: **mse**, **ccc**, **robust**, **mse+ccc**, **robust+ccc**,
+  **hetero**, or **hetero+ccc**
+
+### Heteroscedastic VA regression
+
+`hetero` and `hetero+ccc` change the regression head from two outputs to four:
+
+```text
+[valence_mu, arousal_mu, valence_logvar_raw, arousal_logvar_raw]
+```
+
+For sample `i` and VA dimension `d`, the effective log-variance and variance are
+
+```text
+s_i,d = clip(logvar_raw_i,d, hetero_logvar_min, hetero_logvar_max)
+variance_i,d = exp(s_i,d)
+```
+
+The optimized Gaussian negative log-likelihood, with the constant omitted, is
+
+```text
+L_NLL = mean_i,d 0.5 * [exp(-s_i,d) * (y_i,d - mu_i,d)^2 + s_i,d].
+```
+
+The two heteroscedastic objectives are
+
+```text
+hetero:     L = L_NLL + lambda_MSE * MSE(mu, y)
+hetero+ccc: L = L_NLL + lambda_MSE * MSE(mu, y)
+                       + lambda_CCC * mean_d(1 - CCC_d)
+```
+
+where the minibatch concordance correlation coefficient is calculated directly
+from centered sample moments:
+
+```text
+CCC_d = 2 * cov(mu_d, y_d)
+        / [var(mu_d) + var(y_d) + (mean(mu_d) - mean(y_d))^2].
+```
+
+The CCC term is applied only to the two predicted means, never to log-variance.
+A dimension whose target variance is effectively zero in a minibatch is excluded
+from that minibatch's CCC average, which keeps singleton or constant-label batches
+finite. `hetero` fixes `lambda_CCC` to zero; `--hetero-ccc-weight` is active only
+for `hetero+ccc`. CCC moments use the actual per-device minibatch: gradient
+accumulation does not enlarge that statistical batch, and a batch of one contributes
+no CCC gradient. Use a per-device batch size of at least two when enabling CCC.
+
+Example:
+
+```bash
+python train_model.py distilbert hetero+ccc \
+  --hetero-mse-weight 0.1 \
+  --hetero-ccc-weight 0.1 \
+  --hetero-logvar-min -5 \
+  --hetero-logvar-max 3 \
+  --data-dir ./data_no_iemocap \
+  --preds-dir ./Preds/distilbert_hetero_ccc_seed42 \
+  --seed 42
+```
+
+The fold prediction files retain the four raw model outputs. In
+`all_predictions.csv`, `valence_logvar_pred` and `arousal_logvar_pred` are also
+raw outputs. The report builder adds the values actually used by the loss and
+metrics:
+
+```text
+valence_effective_logvar_pred, arousal_effective_logvar_pred
+valence_variance_pred, arousal_variance_pred
+```
+
+Use the effective columns for calibration or uncertainty ranking. Raw values can
+lie outside the configured bounds and are retained only for diagnostics. The exact
+bounds are saved in `training_parameters.json` and copied into the overall metrics.
+Saved model directories also contain `heteroscedastic_config.json`, including the
+effective objective weights, bounds, four-column output schema, and the actual
+checkpoint-selection metric/direction, even for custom gaze wrappers that are not
+Hugging Face `PreTrainedModel` subclasses.
+
+`overall_metrics.csv/json` and `dataset_metrics.csv` report MSE, RMSE, MAE, Pearson
+correlation (PCC), and CCC. Four-output runs additionally report Gaussian NLL,
+uncertainty-versus-squared-error Spearman correlation, empirical coverage within
+one and two predicted standard deviations, and the ratio between observed MSE and
+mean predicted variance. Lower/upper clamp rates show how often raw log-variance
+fell outside the configured bounds. The backward-compatible `mean_logvar_*` keys
+remain raw; `mean_raw_logvar_*` and `mean_effective_logvar_*` make both meanings
+explicit. Unlike the optimized loss shown above, the reported Gaussian NLL includes
+the `0.5 * log(2*pi)` normalizing constant. Because hard clipping gives the
+log-variance head zero gradient outside the bounds, high clamp rates indicate
+boundary saturation and should trigger a bounds/weight review.
+
+Two OOF diagnostic tables are written only for four-output runs:
+
+- `uncertainty_calibration.csv` places effective predicted variance into up to ten
+  approximate equal-count bins separately for valence and arousal without splitting
+  tied values. It reports bin size/fraction, variance range and mean, mean effective
+  log-variance, MSE/RMSE/MAE, Gaussian NLL, one/two-standard-deviation coverage, and
+  MSE-to-mean-variance ratio.
+- `uncertainty_risk_coverage.csv` sorts examples from low to high uncertainty and
+  reports valence, arousal, and joint selective performance at several retained
+  coverage levels. It includes actual retained coverage, sample count, uncertainty
+  score, MSE/RMSE/MAE, PCC, and CCC. A cutoff retains the complete equal-uncertainty
+  tie group, so actual coverage can exceed target coverage rather than depending on
+  row order.
+
+These tables evaluate whether predicted uncertainty is calibrated and whether
+rejecting high-uncertainty cases improves retained-example performance. They do not
+by themselves prove that `hetero+ccc` improves VA accuracy; compare it with the same
+data split, conditions, and seeds used for `mse`, `mse+ccc`, and `hetero`.
 
 ### GazeConcat / GazeAdd (ET model 2) for VA
 
@@ -534,8 +642,25 @@ python train_model.py xlmroberta-base mse+ccc \
 - `--use-gaze-concat` and `--use-gaze-add` are mutually exclusive.
 - with `--use-gaze-concat`, keep `--maxlen <= 255` (concat doubles sequence length).
 - checkpoint options:
-  - `--save-total-limit` (default `1`) keeps only recent checkpoints to reduce disk usage.
+  - `--metric-for-best-model` selects checkpoints with one validation metric. The
+    default is `ccc_mean`, maximized over the complete validation fold for the VA
+    performance objective. Supported alternatives are `pearson_corr_mean`,
+    `mse_mean`, `loss`, and heteroscedastic-only `gaussian_nll_mean`.
+  - use `--metric-for-best-model loss` to recover loss-based checkpoint selection.
+    All compared conditions should use the same checkpoint metric.
+  - `--save-total-limit` (default `1`) retains the selected best checkpoint at the
+    end of training. Transformers may temporarily keep both best and latest while
+    training so the latest state remains resumable.
   - `--save-strategy no` disables periodic checkpoint saving (useful on low-storage GPUs).
+
+The full-fold `ccc_mean` used for checkpoint selection is calculated after gathering
+all validation predictions. It is distinct from the per-device minibatch CCC term
+inside `ccc`, `mse+ccc`, `robust+ccc`, or `hetero+ccc` training losses.
+
+The current two-fold runner uses each held-out fold both for epoch selection and for
+its final OOF prediction. Those OOF scores are therefore validation-selected rather
+than untouched-test estimates. Use an inner validation split or nested evaluation
+before treating the selected score as a final generalization result.
 
 ### Post-encoder gaze strategies
 
@@ -671,7 +796,7 @@ frozen ET predictor identifier is recorded and can be overridden with a local pa
 
 ### Experiment matrix (single README version)
 
-Default VA hyperparameters (unchanged):
+Default VA hyperparameters and checkpoint selection:
 - batch size: `16`
 - learning rate: `6e-6`
 - train epochs: `10`
@@ -681,6 +806,7 @@ Default VA hyperparameters (unchanged):
 - gradient accumulation: `1`
 - seed: `42`
 - maxlen: `200`
+- best checkpoint metric: validation `ccc_mean` (maximize)
 
 Canonical CLI outline (aliases are described in the relevant sections above):
 
@@ -721,6 +847,11 @@ python train_model.py <model> <loss> \
   [--gaze-alignment-dim <int>] \
   [--gaze-alignment-temperature <float>] \
   [--gaze-alignment-max-tokens <int>] \
+  [--hetero-mse-weight <float>] \
+  [--hetero-ccc-weight <float>] \
+  [--hetero-logvar-min <float>] \
+  [--hetero-logvar-max <float>] \
+  [--metric-for-best-model ccc_mean|pearson_corr_mean|mse_mean|loss|gaussian_nll_mean] \
   [--batch-size <int>] \
   [--learning-rate <float>] \
   [--train-epochs <int>] \
@@ -813,6 +944,22 @@ ten epochs, and the real ET2 backend. Use `--help` to see condition names and en
 overrides. `prefix_legacy` is included only in `CONDITIONS=all`; all ordinary concat
 conditions use postfix.
 
+Select the heteroscedastic objective and its coefficients through the same runner:
+
+```bash
+LOSS=hetero+ccc \
+METRIC_FOR_BEST_MODEL=ccc_mean \
+HETERO_MSE_WEIGHT=0.1 \
+HETERO_CCC_WEIGHT=0.1 \
+HETERO_LOGVAR_MIN=-5 \
+HETERO_LOGVAR_MAX=3 \
+CONDITIONS=main \
+bash scripts/run_distilbert_experiments.sh
+```
+
+The accepted `LOSS` values are `mse`, `ccc`, `robust`, `mse+ccc`, `robust+ccc`,
+`hetero`, and `hetero+ccc`.
+
 For condition-by-condition multi-seed DistilBERT experiments, the recommended
 default is three downstream seeds (`42,123,2025`) and the `main` ET2 condition
 group. `main` excludes the legacy gaze-prefix condition:
@@ -824,16 +971,23 @@ export PYTHON_BIN="$CONDA_PREFIX/bin/python"
 SEEDS=42,123,2025 \
 CONDITIONS=main \
 ET_MODEL_TYPE=et2 \
+METRIC_FOR_BEST_MODEL=ccc_mean \
 REQUIRE_CUDA=1 \
 SAVE_STRATEGY=epoch \
 SAVE_FINAL_MODEL=1 \
 bash scripts/run_distilbert_multiseed.sh
 ```
 
-The multi-seed runner uses one output root containing directories such as
-`postfix_ffd_trt_seed42`. Completed runs are skipped on resume by default. After
+The single-seed and multi-seed runners default to `METRIC_FOR_BEST_MODEL=ccc_mean`
+and forward the same selection metric to every loss and gaze condition. The
+multi-seed runner uses one output root containing directories such as
+`postfix_ffd_trt_seed42`. Completed runs are skipped on resume only when their saved
+checkpoint-selection state and `save_final_model` setting match the requested run;
+old manifests without a metric field are treated as loss-selected runs. After
 all seeds finish, it writes `multiseed_runs.csv`, `multiseed_summary.csv`, and
-`multiseed_summary.json`; standard deviations are sample standard deviations.
+`multiseed_summary.json`; standard deviations are sample standard deviations. It
+forwards `LOSS` and all four `HETERO_*` settings to every seed and includes the loss
+name in its default output-root name.
 
 Use the TRT-only emotion predictor across the same three downstream seeds with:
 
